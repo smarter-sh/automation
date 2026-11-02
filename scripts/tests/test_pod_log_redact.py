@@ -31,6 +31,45 @@ class TestPodLogRedact(unittest.TestCase):
         self.assertIn("127.0.0.1", text)
         self.assertEqual(counts, {"email": 1, "secret": 1, "ip-address": 1})
 
+    def test_redact_keeps_traceback_source_lines(self):
+        # Python prints each frame's source line in a traceback: code, not a value.
+        lines = (
+            'File ".../knox/auth.py", line 50, in authenticate\n'
+            "    user, auth_token = self.authenticate_credentials(auth[1])\n"
+            "                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^\n"
+            'File ".../smarter/lib/drf/token_authentication.py", line 118, in authenticate_credentials\n'
+            "    user, auth_token = super().authenticate_credentials(token)\n"
+            "    token = request.headers.get_authorization_header(request)\n"
+            "    password = settings.get_database_password()\n"
+        )
+        counts: collections.Counter = collections.Counter()
+        self.assertEqual(redact(lines, counts), lines)
+        self.assertEqual(counts, {})
+
+    def test_redact_keeps_secret_names(self):
+        # Smarter's receivers describe a Secret resource by its name, never its value.
+        line = (
+            "INFO - smarter.apps.secret.receivers.secret_accessed() from Secret Secret: openai_api_key, id: 1, "
+            "user_profile: pk=1"
+        )
+        counts: collections.Counter = collections.Counter()
+        self.assertEqual(redact(line, counts), line)
+        self.assertEqual(counts, {})
+
+    def test_redact_still_finds_values(self):
+        counts: collections.Counter = collections.Counter()
+        text = redact(
+            "secret: Zx81aBcD, then auth_token=9f8e7d6c5b4a, password: 'qwerty123', "
+            "Authorization: Bearer 9f8e7d6c5b4a3f2e1d0c",
+            counts,
+        )
+        self.assertEqual(
+            text,
+            "secret: <redacted:secret>, then auth_token=<redacted:secret>, password: '<redacted:secret>', "
+            "Authorization: Bearer <redacted:token>",
+        )
+        self.assertEqual(counts, {"secret": 3, "token": 1})
+
     def test_main_rewrites_logs_in_place(self):
         with tempfile.TemporaryDirectory() as folder:
             log = Path(folder) / "smarter" / "pod.log"

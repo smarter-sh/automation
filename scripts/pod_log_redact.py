@@ -52,6 +52,13 @@ import sys
 DESCRIPTION = "Redact credentials and personal data from downloaded logs, in place."
 """The command line's description."""
 
+NOT_A_CALL = r"(?!(?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*\()"
+"""A lookahead that fails on a Python call, e.g. ``self.authenticate_credentials(auth[1])``.
+
+Python prints each frame's source line in a traceback, so ``user, auth_token = super().authenticate(token)``
+is source code, not a value: the "token" and "secret" patterns skip it.
+"""
+
 PATTERNS: list[tuple[str, re.Pattern]] = [
     # In this order: a credential is redacted whole before the "token" and "secret" patterns below,
     # which would redact only part of it. The examples are shortened with "…".
@@ -95,22 +102,31 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
     #   mysql://smarter:s3cret@db:3306/ -> mysql://<redacted:password-in-url>@db:3306/
     ("password-in-url", re.compile(r"://(?P<value>[^:/\s@]+:[^@\s/]+)@")),
     #
-    # The value after a word such as Bearer, token or api_key, if it is 16 or more characters:
+    # The value after a word such as Bearer, token or api_key, if it is 16 or more characters and
+    # not a Python call (see NOT_A_CALL):
     #   Authorization: Bearer 9f8e7d6c5b4a3f2e… -> Authorization: Bearer <redacted:token>
     #   "api_key": "AbCdEf0123456789…"           -> "api_key": "<redacted:token>"
     (
         "token",
-        re.compile(r"(?i)\b(?:bearer|token|apikey|api-key|api_key)[\"' :=]{1,3}(?P<value>[A-Za-z0-9._~+/-]{16,}=*)"),
+        re.compile(
+            r"(?i)\b(?:bearer|token|apikey|api-key|api_key)[\"' :=]{1,3}"
+            + NOT_A_CALL
+            + r"(?P<value>[A-Za-z0-9._~+/-]{16,}=*)"
+        ),
     ),
     #
     # The value of a password or secret setting, if it is 6 or more characters:
     #   password=hunter22            -> password=<redacted:secret>
     #   "client_secret": "Zx81…"     -> "client_secret": "<redacted:secret>"
+    # but not a Python call in a traceback's source line (see NOT_A_CALL), nor the name in
+    # Smarter's description of a Secret resource, "Secret: openai_api_key, id: 1": a value is
+    # never followed by ", id: <number>".
     (
         "secret",
         re.compile(
             r"(?i)\b(?:password|passwd|pwd|secret|client_secret|access_token|auth_token)[\"']?[ \t]*[:=][ \t]*[\"']?"
-            r"(?P<value>[^\s\"',;&]{6,})"
+            + NOT_A_CALL
+            + r"(?P<value>[^\s\"',;&]{6,})(?![^\s\"',;&])(?!,[ \t]*id:[ \t]*\d)"
         ),
     ),
     #
