@@ -99,7 +99,7 @@ jobs:
       sha: ${{ steps.release.outputs.sha }}
     steps:
       - name: Checkout the platform
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: smarter-sh/smarter
           ref: main
@@ -171,13 +171,13 @@ jobs:
       # this repository, for scripts/api_contract_sync.py. First, because a checkout at the
       # workspace's root would remove the folders of the others.
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       # the platform, at main, with every tag, which sync-contracts.sh reads with git show.
       - name: Checkout the platform
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: smarter-sh/smarter
           ref: main
@@ -188,7 +188,7 @@ jobs:
 
       # the token is kept in the checkout's git configuration, so that publish can push the sync branch.
       - name: Checkout ${{ matrix.repository }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: smarter-sh/${{ matrix.repository }}
           ref: ${{ env.BASE }}
@@ -272,7 +272,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
