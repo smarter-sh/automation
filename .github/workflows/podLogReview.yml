@@ -192,14 +192,14 @@ jobs:
       # own, beside smarter/ rather than around it: Claude Code reads every CLAUDE.md above its
       # working directory, and must see smarter's instructions and skills only.
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           path: automation
           persist-credentials: false
 
       # Claude Code runs here, and reads its code, history and skills.
       - name: Checkout smarter
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: smarter-sh/smarter
           path: smarter
