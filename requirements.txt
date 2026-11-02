@@ -2,3 +2,6 @@
 # into venv/. The workflows' scripts need none: they use only the standard library. Dependabot keeps
 # these current: see .github/dependabot.yml.
 pre-commit==4.7.0
+# ShellCheck, which actionlint runs on every workflow's run: blocks, as GitHub's runners have it. Without it
+# on your PATH (an active venv), actionlint skips those checks, and CI finds what make lint didn't.
+shellcheck-py==0.11.0.1
