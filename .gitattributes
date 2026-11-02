@@ -1,0 +1,3 @@
+# Workflows, scripts and prompts are text, with LF line endings on every platform: a CRLF in a
+# run: block or a shell script breaks it on the runner.
+* text=auto eol=lf

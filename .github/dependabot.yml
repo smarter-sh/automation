@@ -1,0 +1,17 @@
+---
+# Keeps the actions the workflows use, and the pre-commit hooks, current. Merging these pull requests also keeps
+# the repository active, so that GitHub doesn't disable its schedules after 60 days without a commit.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "monthly"

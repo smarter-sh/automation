@@ -1,0 +1,36 @@
+name: "🐛 A job failed or misbehaved"
+description: A scheduled job failed, didn't run, or wrote something it shouldn't have (an issue, pull request, merge or Slack post).
+title: "🐛 [JOB] - <workflow>: <what went wrong>"
+labels: ["bug"]
+body:
+  - type: input
+    id: workflow
+    attributes:
+      label: "Workflow"
+      description: The workflow's file name.
+      placeholder: ex. podLogReview.yml
+    validations:
+      required: true
+  - type: input
+    id: run-url
+    attributes:
+      label: "Run"
+      description: The url of the run on the Actions tab, if there is one.
+      placeholder: ex. https://github.com/smarter-sh/automation/actions/runs/123
+    validations:
+      required: false
+  - type: textarea
+    id: description
+    attributes:
+      label: "What happened"
+      description: What the job did, and what you expected it to do. Link anything it wrote in another repository.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Log excerpt"
+      description: The relevant lines of the run's log. This repository is public, so leave out tokens, account ids and private hostnames.
+      render: text
+    validations:
+      required: false

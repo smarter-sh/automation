@@ -1,0 +1,9 @@
+# Settings of the Python tools that the pre-commit hooks run. This repository is not a Python
+# package: its scripts in scripts/ use only the standard library, and run with python3 -I.
+[tool.black]
+line-length = 120
+target-version = ['py312']
+
+[tool.isort]
+profile = "black"
+line_length = 120

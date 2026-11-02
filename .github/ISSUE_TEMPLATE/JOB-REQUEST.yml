@@ -1,0 +1,26 @@
+name: "💡 A new job, or a change to one"
+description: Propose a scheduled job, or a change to what an existing one checks or does.
+title: "💡 [JOB] - <title>"
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: "What should it do"
+      description: Which repositories it works on, what it checks or changes, and how often.
+    validations:
+      required: true
+  - type: textarea
+    id: writes
+    attributes:
+      label: "What it writes"
+      description: Issues, pull requests, merges, Slack posts. What should a dry run report instead?
+    validations:
+      required: true
+  - type: textarea
+    id: secrets
+    attributes:
+      label: "Secrets"
+      description: The secrets it needs, by name only, and what it does without each optional one.
+    validations:
+      required: false

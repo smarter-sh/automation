@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question on Slack
+    url: https://join.slack.com/t/thesmarterproject/shared_invite/zt-4f0t6v46q-e2c5Of4hS4fBr_XwfQARCw
+    about: Real-time questions and discussion with other Smarter users and contributors.
+  - name: Report a problem with the Smarter platform itself
+    url: https://github.com/smarter-sh/smarter/issues/new/choose
+    about: Bugs and feature requests for Smarter belong in smarter-sh/smarter. This repository holds only its scheduled jobs.

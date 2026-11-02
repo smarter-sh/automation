@@ -1,0 +1,61 @@
+---
+#------------------------------------------------------------------------------
+# Tests.
+#
+# Runs the pre-commit hooks (actionlint, which type-checks every workflow and
+# runs ShellCheck on its run: blocks, among them) and the scripts' tests
+# (scripts/tests), on every pull request and every push to main, so that they
+# run even for a change made in GitHub's web editor. Unlike the scheduled
+# jobs, it writes nothing and uses no secret.
+#
+# The scripts' tests run on the runner's own python3, the one the scheduled
+# jobs run them with.
+#------------------------------------------------------------------------------
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    name: Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Run the checks
+        run: |
+          python -m pip install --quiet -r requirements.txt
+          SKIP=commitlint pre-commit run --all-files --show-diff-on-failure
+
+  scripts:
+    name: Scripts' tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Run the tests
+        run: python3 -m unittest discover -v -s scripts/tests -t scripts

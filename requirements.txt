@@ -1,0 +1,4 @@
+# The Python packages for working on this repository from your own computer: make init installs them
+# into venv/. The workflows' scripts need none: they use only the standard library. Dependabot keeps
+# these current: see .github/dependabot.yml.
+pre-commit==4.7.0

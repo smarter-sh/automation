@@ -1,0 +1,7 @@
+# Pull requests that change these files ask these people for a review.
+* @lpm0073
+
+# The workflows, and the scripts and prompts they run, hold credentials that reach every
+# smarter-sh repository.
+.github/ @lpm0073
+scripts/ @lpm0073
