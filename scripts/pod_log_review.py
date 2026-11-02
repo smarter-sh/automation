@@ -63,6 +63,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from pod_log_loki import SOURCE_NAME as LOKI_SOURCE_NAME
 from pod_log_redact import REPORT_NAME, read_report
 from pod_log_review_stream import (
     PodInventory,
@@ -243,6 +244,26 @@ def claude_environment() -> dict[str, str]:
     return env
 
 
+def log_source(log_dir: str) -> str:
+    """
+    Say where the logs came from, from the first line that ``pod_log_loki.py`` wrote in ``inventory/``.
+
+    :param log_dir: The log folder.
+    :returns: The line, e.g. ``loki: every pod's log of the period, ...`` or ``kubectl: the running pods'
+        logs, ... Loki could not be read: ...``, or ``kubectl`` alone if the file is missing, as it is when
+        the review runs on logs that only ``download-logs.sh`` wrote.
+    """
+    path = os.path.join(log_dir, "inventory", LOKI_SOURCE_NAME)
+    try:
+        with open(path, encoding="utf-8") as source:
+            first_line = source.readline().strip()
+    except OSError:
+        return "kubectl: the running pods' logs, from kubectl logs."
+    if not first_line:
+        return "kubectl: the running pods' logs, from kubectl logs."
+    return first_line
+
+
 def prompt(settings: Settings) -> str:
     """
     Return the message that starts the review: the run's parameters.
@@ -258,7 +279,14 @@ def prompt(settings: Settings) -> str:
         mode = "DRY RUN: write nothing to GitHub. Report what you would have opened, commented, closed and proposed."
     else:
         mode = "Act: write issues, comments, closings and pull requests within the limits."
-    span = f"the last {settings.since}" if settings.since else "the lifetime of the container"
+    source = log_source(settings.log_dir)
+    from_loki = source.startswith("loki:")
+    if settings.since:
+        span = f"the last {settings.since}"
+    elif from_loki:
+        span = "the last 72 hours, all that Loki keeps"
+    else:
+        span = "the lifetime of the container"
     report = read_report(settings.log_dir)
     if report.get("total"):
         kinds = ", ".join(f"{kind} {count}" for kind, count in report.get("kinds", {}).items())
@@ -279,6 +307,7 @@ def prompt(settings: Settings) -> str:
             "",
             f"- Environment: {settings.environment}, https://{settings.platform_domain}",
             f"- Log folder: {settings.log_dir}",
+            f"- Log source: {source} See inventory/{LOKI_SOURCE_NAME}.",
             f"- Each log covers: {span}",
             f"- Deployed release (image tags): {releases}",
             f"- Redactions: {redactions}",

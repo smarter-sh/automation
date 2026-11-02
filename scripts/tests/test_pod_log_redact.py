@@ -31,6 +31,20 @@ class TestPodLogRedact(unittest.TestCase):
         self.assertIn("127.0.0.1", text)
         self.assertEqual(counts, {"email": 1, "secret": 1, "ip-address": 1})
 
+    def test_redact_alloy_markers(self):
+        # a log read from Loki was redacted by Alloy: its markers become findings, except <ip>.
+        counts: collections.Counter = collections.Counter()
+        text = redact(
+            "user <email> signed in, Authorization: Bearer <redacted>, password=<redacted>, from <ip>",
+            counts,
+        )
+        self.assertEqual(
+            text,
+            "user <redacted:email> signed in, Authorization: Bearer <redacted:credential>, "
+            "password=<redacted:credential>, from <ip>",
+        )
+        self.assertEqual(counts, {"email": 1, "credential": 2}, "<ip> is not counted: Alloy replaces every address")
+
     def test_redact_keeps_traceback_source_lines(self):
         # Python prints each frame's source line in a traceback: code, not a value.
         lines = (

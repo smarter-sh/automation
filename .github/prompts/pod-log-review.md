@@ -21,12 +21,21 @@ the message that started you.
   Glob, and read-only git (`git log`, `git show`, `git diff`, `git tag`, `git branch -a`,
   `git grep`, `git blame`). The deployed release is a tag: read the code at that tag
   (`git show <tag>:<path>`) when it differs from the checkout.
-- **The logs**, already downloaded and redacted, in the log folder: one folder per deployment,
-  one `.log` per pod, `.previous.log` for the container before its last restart, and
-  `inventory/` (pods, events, describe, images). Read them with Grep, Read with an offset and a
-  limit, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, and
-  `python3 -I skills/smarter-log-review/scripts/scan-log.py`. Never read a whole large log at once.
-  You cannot edit or write files: a fix goes into `create_pull_request` as whole file contents.
+- **The logs**, already downloaded and redacted, in the log folder: one folder per component,
+  one `.log` per pod, each line starting with its time (UTC), and `inventory/` (pods, events,
+  describe, images, from kubectl). `inventory/log-source.txt` says where the logs came from:
+  - `loki:` (the normal case): every pod's log of the whole period, from the environment's Loki,
+    which keeps 72 hours. It includes MariaDB (`mariadb/`), and pods that no longer run, e.g.
+    those replaced with a spot node or a deploy, which `inventory/pods.txt` does not list. A
+    restarted container's lines before and after the restart are in the same file, in order: there
+    is no `.previous.log`. The file states the period, and names any pod whose log was cut at its
+    line limit.
+  - `kubectl:`: Loki could not be read, and the file says why. That is itself a finding about the
+    environment's logging (category `infrastructure`). The logs are then the running pods' only,
+    from `kubectl logs`, with a `.previous.log` for a container's log before its last restart. Read them with Grep, Read with an offset and a
+    limit, `grep`, `wc`, `sort`, `uniq`, `head`, `tail`, `cut`, and
+    `python3 -I skills/smarter-log-review/scripts/scan-log.py`. Never read a whole large log at once.
+    You cannot edit or write files: a fix goes into `create_pull_request` as whole file contents.
 - **The Smarter Project MCP server** (`mcp__smarter-project__*`): `search_issues`, `read_issue`,
   `create_issue`, `comment_on_issue`, `close_issue`, `create_pull_request`, and the code,
   documentation and blog search tools. The write tools act as the repository's maintainer
@@ -59,8 +68,10 @@ Keep this list. Every finding is matched against it.
 ### 2. Review the logs
 
 Follow `smarter-pod-log-review` steps 1 to 5, on the downloaded files: inventory (restarts,
-OOMKilled, events, image tags), then each deployment's logs, then the comparison across pods.
-State the time span that the logs cover.
+OOMKilled, events, image tags), then each component's logs, then the comparison across pods.
+The skill describes logs from `kubectl logs`: with logs from Loki, read a restart's evidence in
+the same file, around the time of the restart, and review MariaDB's log too. State the time span
+that the logs cover, from `inventory/log-source.txt`.
 
 Group repeats before you think about them. One exception that occurs 500 times, on 3 pods, is
 **one finding** with a count, a time span and the pods, not 500 findings.
@@ -89,7 +100,17 @@ what is a hypothesis: never present a guess as a fact.
 
 Smarter's logs must never hold a credential or personal data. The redactor, `scripts/pod_log_redact.py`
 in smarter-sh/automation (not in your working directory), replaced what looked like one with a placeholder, e.g. `<redacted:email>`, before you started,
-but that is a safety net, not the fix. **Every placeholder is an actionable finding**, and the
+but that is a safety net, not the fix.
+
+Logs from Loki were redacted once already, by Grafana Alloy, before Loki stored them (smarter's
+`helm/charts/smarter/values.yaml`, `loki.process "redact"`). Alloy writes `<email>` for an email
+address, `<redacted>` for a token, an api key, a JWT, an AWS key or a password, and `<ip>` for
+every IPv4 address. The redactor turns the first two into `<redacted:email>` and
+`<redacted:credential>`, which are findings like any other placeholder: the value is gone, so
+diagnose them from the log statement that wrote the line. `<ip>` is left as it is, and is **not** a
+finding by itself: Alloy replaces every address, the pods' and nodes' private ones too, so it does
+not say that a person's address was logged. Report an `<ip>` only where the log statement shows
+that it logs a client's address where it should not. **Every placeholder is an actionable finding**, and the
 message that started you says how many there are (`- Redactions:`). `redactions.json`, in the log
 folder, lists each file, kind and line number; it never holds the redacted value, and neither do
 the logs any more.

@@ -154,6 +154,22 @@ See :func:`redact_ip`.
 KEEP_IPS = {"127.0.0.1", "0.0.0.0", "::1"}  # nosec B104: addresses to keep, not to bind
 """Addresses that say where a server listens, not who connected."""
 
+ALLOY_MARKERS: list[tuple[str, re.Pattern]] = [
+    ("email", re.compile(r"<email>")),
+    ("credential", re.compile(r"<redacted>")),
+]
+"""What Grafana Alloy writes in place of a value it redacted, and the kind that it becomes here.
+
+The platform's Helm chart redacts the logs before Loki stores them (``loki.process "redact"`` in smarter's
+``helm/charts/smarter/values.yaml``), so a log read from Loki (``pod_log_loki.py``) holds Alloy's markers
+instead of the values: ``<email>`` for an email address, ``<redacted>`` for a token, an api key, a JWT, an
+AWS key or a password, and ``<ip>`` for any IPv4 address. The first two become this script's own
+placeholders, ``<redacted:email>`` and ``<redacted:credential>``, and are counted, because a log that held
+one is still a finding: Smarter logged something that it must not. ``<ip>`` is left as it is, and not
+counted: Alloy replaces every IPv4 address, the pods' own private addresses too, so it doesn't say that a
+person's address was logged.
+"""
+
 PLACEHOLDER = re.compile(r"<redacted:(?P<kind>[a-z-]+)>")
 """A placeholder that :func:`redact_match` or :func:`redact_ip` wrote, e.g. ``<redacted:email>``."""
 
@@ -215,10 +231,18 @@ def redact(text: str, counts: collections.Counter) -> str:
     """
     Return the text with every match of :data:`PATTERNS` and every public IP address replaced.
 
+    Alloy's markers (:data:`ALLOY_MARKERS`) become placeholders first, so that the patterns below leave the
+    values that Alloy already redacted alone.
+
     :param text: The text of a log.
     :param counts: Counts the matches by kind, e.g. ``email``, updated in place.
     :returns: The text, with each match replaced by ``<redacted:<kind>>``.
     """
+    for kind, marker in ALLOY_MARKERS:
+        placeholder = f"<redacted:{kind}>"
+        text, found = marker.subn(placeholder, text)
+        if found:
+            counts[kind] += found
     for kind, pattern in PATTERNS:
         # sub() calls the function with each match, and puts what it returns in the match's place.
         text = pattern.sub(functools.partial(redact_match, kind=kind, counts=counts), text)
