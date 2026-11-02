@@ -35,15 +35,15 @@ file holds only what applies to nearly every task.
 
 ## Repository map
 
-| Path                     | Contents                                                                                                                                                                                               |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `.github/workflows/`     | One workflow per job, named in camelCase (`apiContractSync.yml`), each with a header comment. `test.yml` is the exception: no schedule, it runs the hooks and the scripts' tests on every pull request |
-| `scripts/`               | Python (standard library only) and shell that the workflows run                                                                                                                                        |
-| `scripts/tests/`         | unittest tests of `scripts/`. `-t scripts`: the scripts import each other by name                                                                                                                      |
-| `.env.example`           | Local copies of the secrets (GH_TOKEN, Slack, Claude, AWS). Never read or print `.env`                                                                                                                 |
-| `.github/prompts/`       | Instructions and permission rules for the jobs that run Claude Code                                                                                                                                    |
-| `.github/dependabot.yml` | Keeps the actions the workflows use, and the pre-commit hooks, current                                                                                                                                 |
-| `skills/`                | Agent Skills for working on this repository                                                                                                                                                            |
+| Path                     | Contents                                                                                                                                                                                                |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.github/workflows/`     | One workflow per job, named in camelCase (`apiContractSync.yml`), each with a header comment. `tests.yml` is the exception: no schedule, it runs the hooks and the scripts' tests on every pull request |
+| `scripts/`               | Python (standard library only) and shell that the workflows run                                                                                                                                         |
+| `scripts/tests/`         | unittest tests of `scripts/`. `-t scripts`: the scripts import each other by name                                                                                                                       |
+| `.env.example`           | Local copies of the secrets (GH_TOKEN, Slack, Claude, AWS). Never read or print `.env`                                                                                                                  |
+| `.github/prompts/`       | Instructions and permission rules for the jobs that run Claude Code                                                                                                                                     |
+| `.github/dependabot.yml` | Keeps the actions the workflows use, and the pre-commit hooks, current                                                                                                                                  |
+| `skills/`                | Agent Skills for working on this repository                                                                                                                                                             |
 
 ## Common commands
 

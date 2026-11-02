@@ -54,12 +54,12 @@ These bite cron-only repositories in particular:
 Set by the user in the repository's settings. Never ask for their values, print them, or write them to a file that
 is uploaded. Each workflow's header comment lists the ones it uses, and what it does without each optional one.
 
-| Secret                                         | Used for                                                        |
-| ---------------------------------------------- | --------------------------------------------------------------- |
-| `PAT`                                          | Pushing, pull requests, issues and merges in other repositories |
-| `SLACK_BOT_TOKEN`                              | Posting a run's report to Slack (optional: no token, no post)   |
-| `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` | Jobs that run Claude Code                                       |
-| `AWS_*`, `EKS_CLUSTER_NAME`                    | Jobs that read a deployed environment (kubectl, read-only)      |
+| Secret                                         | Used for                                                                                                                                                                                                                                                      |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PAT`                                          | Pushing, pull requests, issues and merges in other repositories, and starting their workflows. Merging a pull request that changes `.github/workflows/` (Dependabot's github-actions updates) needs its `workflow` scope; starting a workflow may need `repo` |
+| `SLACK_BOT_TOKEN`                              | Posting a run's report to Slack (optional: no token, no post)                                                                                                                                                                                                 |
+| `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` | Jobs that run Claude Code                                                                                                                                                                                                                                     |
+| `AWS_*`, `EKS_CLUSTER_NAME`                    | Jobs that read a deployed environment (kubectl, read-only)                                                                                                                                                                                                    |
 
 Add a row when a new workflow needs a new secret, and tell the user to create it.
 

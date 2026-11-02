@@ -243,7 +243,7 @@ jobs:
           TESTS: ${{ steps.tests.outcome }}
         run: |
           mkdir -p "$RUNNER_TEMP/result"
-          python3 -I "$GITHUB_WORKSPACE/scripts/api_contract_sync.py" status \
+          python3 -E -s "$GITHUB_WORKSPACE/scripts/api_contract_sync.py" status \
             --repository "$REPOSITORY" --tag "$TAG" --sha "$SHA" --shipped "$SHIPPED" \
             --baseline "$BASELINE" --tests "$TESTS" \
             --output "$RUNNER_TEMP/result/${{ matrix.repository }}.json"
@@ -254,7 +254,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT }}
         run: |
-          python3 -I "$GITHUB_WORKSPACE/scripts/api_contract_sync.py" publish \
+          python3 -E -s "$GITHUB_WORKSPACE/scripts/api_contract_sync.py" publish \
             --result "$RUNNER_TEMP/result/${{ matrix.repository }}.json" --base "$BASE" --run-url "$RUN_URL"
 
       - name: Upload the result
@@ -289,7 +289,7 @@ jobs:
         env:
           TAG: ${{ needs.release.outputs.tag }}
         run: |
-          python3 -I scripts/api_contract_sync.py report --results "$RUNNER_TEMP/results" \
+          python3 -E -s scripts/api_contract_sync.py report --results "$RUNNER_TEMP/results" \
             --tag "$TAG" --run-url "$RUN_URL" --summary "$GITHUB_STEP_SUMMARY" > "$RUNNER_TEMP/slack.txt"
 
       # One message per run: the repositories that need attention, or a clean bill of health.
@@ -301,4 +301,4 @@ jobs:
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           DRY_RUN_FLAG: ${{ env.DRY_RUN == 'true' && '--dry-run' || '' }}
-        run: python3 -I scripts/slack_post.py --channel "$SLACK_CHANNEL" $DRY_RUN_FLAG < "$RUNNER_TEMP/slack.txt"
+        run: python3 -I scripts/slack_post.py --channel "$SLACK_CHANNEL" ${DRY_RUN_FLAG:+"$DRY_RUN_FLAG"} < "$RUNNER_TEMP/slack.txt"

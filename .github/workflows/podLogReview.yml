@@ -212,15 +212,17 @@ jobs:
       - name: Set the namespace and domain
         shell: bash
         run: |
-          echo "NAMESPACE=${NAMESPACE_BASE}-${ENVIRONMENT}" >> "$GITHUB_ENV"
-          if [ "$ENVIRONMENT" = "prod" ]; then
-            echo "PLATFORM_DOMAIN=${PLATFORM_SUBDOMAIN}.${ROOT_DOMAIN}" >> "$GITHUB_ENV"
-          else
-            echo "PLATFORM_DOMAIN=${ENVIRONMENT}.${PLATFORM_SUBDOMAIN}.${ROOT_DOMAIN}" >> "$GITHUB_ENV"
-          fi
-          echo "LOG_DIR=$RUNNER_TEMP/pod-logs" >> "$GITHUB_ENV"
-          echo "SMARTER_DIR=$GITHUB_WORKSPACE/smarter" >> "$GITHUB_ENV"
-          echo "SCRIPTS=$GITHUB_WORKSPACE/automation/scripts" >> "$GITHUB_ENV"
+          {
+            echo "NAMESPACE=${NAMESPACE_BASE}-${ENVIRONMENT}"
+            if [ "$ENVIRONMENT" = "prod" ]; then
+              echo "PLATFORM_DOMAIN=${PLATFORM_SUBDOMAIN}.${ROOT_DOMAIN}"
+            else
+              echo "PLATFORM_DOMAIN=${ENVIRONMENT}.${PLATFORM_SUBDOMAIN}.${ROOT_DOMAIN}"
+            fi
+            echo "LOG_DIR=$RUNNER_TEMP/pod-logs"
+            echo "SMARTER_DIR=$GITHUB_WORKSPACE/smarter"
+            echo "SCRIPTS=$GITHUB_WORKSPACE/automation/scripts"
+          } >> "$GITHUB_ENV"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6

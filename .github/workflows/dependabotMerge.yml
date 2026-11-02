@@ -1,0 +1,97 @@
+---
+#------------------------------------------------------------------------------
+# Dependabot Merge.
+#
+# Once a week, goes through the open Dependabot pull requests of every
+# smarter-sh repository that isn't archived, oldest first:
+#
+#   - no merge conflicts, every check passed: merged (squash where the
+#     repository allows it), never with --admin, so branch protection holds;
+#   - no merge conflicts, required checks still running or the base moved:
+#     set to auto-merge, where the repository allows it;
+#   - merge conflicts: closed, with a comment that says how to get it back.
+#     Conflicts that this run's own merges caused are left for Dependabot to
+#     rebase;
+#   - failing checks, drafts, and states GitHub hasn't computed: left open.
+#
+# Then posts one message to Slack that lists the closed pull requests and the
+# ones that need a person, and counts the merged ones.
+#
+# The logic is in scripts/dependabot_merge.py, whose tests are in
+# scripts/tests. Merges, closes and comments show the PAT owner's name.
+#
+# Secrets:
+#   PAT               a GitHub classic personal access token, ghp_..., with the
+#                     public_repo and workflow scopes, that may merge and close
+#                     pull requests in every smarter-sh repository. Dependabot's
+#                     github-actions updates change .github/workflows/, which
+#                     GitHub merges only with the workflow scope. Without it,
+#                     the run fails.
+#   SLACK_BOT_TOKEN   optional: the Smarter Slack app's bot token, with
+#                     chat:write.public, or the bot must be a member of
+#                     #general. Without it, nothing is posted.
+#------------------------------------------------------------------------------
+name: Dependabot Merge
+
+on:
+  schedule:
+    - cron: "47 13 * * 3" # weekly, Wednesday 13:47 UTC
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Decide and report only: merge and close nothing, and post nothing to Slack."
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: dependabot-merge
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+  SLACK_CHANNEL: "general"
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Merge or close every open Dependabot pull request
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+        run: |
+          args=(--output "$RUNNER_TEMP/results.json" --run-url "$RUN_URL")
+          if [[ "$DRY_RUN" == "true" ]]; then args+=(--dry-run); fi
+          python3 -E -s scripts/dependabot_merge.py run "${args[@]}"
+
+      # fails when a merge, close or listing failed.
+      - name: Summarize
+        if: always()
+        shell: bash
+        run: |
+          args=(--results "$RUNNER_TEMP/results.json" --run-url "$RUN_URL" --summary "$GITHUB_STEP_SUMMARY")
+          if [[ "$DRY_RUN" == "true" ]]; then args+=(--dry-run); fi
+          python3 -E -s scripts/dependabot_merge.py report "${args[@]}" > "$RUNNER_TEMP/slack.txt"
+
+      # One message per run. A Slack outage must never fail the run.
+      - name: Post to Slack
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          args=(--channel "$SLACK_CHANNEL")
+          if [[ "$DRY_RUN" == "true" ]]; then args+=(--dry-run); fi
+          python3 -I scripts/slack_post.py "${args[@]}" < "$RUNNER_TEMP/slack.txt"

@@ -78,4 +78,4 @@ jobs:
         run: |
           set -o pipefail
           npm run --silent --prefix smarter/smarter/react/packages/smarter-didyouknow slack:fact \
-            | python3 -I scripts/slack_post.py --channel "$SLACK_CHANNEL" $DRY_RUN
+            | python3 -I scripts/slack_post.py --channel "$SLACK_CHANNEL" ${DRY_RUN:+"$DRY_RUN"}

@@ -1,0 +1,228 @@
+---
+#------------------------------------------------------------------------------
+# Embed Version Sync.
+#
+# Checks, once a week, that the latest release of every repository that brings
+# Smarter Chat to another ecosystem loads the latest @smarter.sh/ui-chat on
+# npm, and proposes the update where it doesn't:
+#
+#   smarter-wordpress              the WordPress plugin (bundles the script)
+#   smarter-drupal                 the Drupal module
+#   smarter-gtm-template           the Google Tag Manager template
+#   smarter-shopify                the Shopify theme app extension
+#   smarter-docs-site-generators   the Docusaurus, MkDocs, Sphinx and VitePress plugins
+#
+# Each pins an exact version of the embed script, in files that
+# scripts/embed_version_sync.py's PINS lists.
+#
+# The jobs:
+#
+#   package   Finds the latest version of @smarter.sh/ui-chat on npm.
+#   check     One runner per repository, at its --base branch (alpha):
+#               1. updates its pins to that version with the repository's
+#                  own command (make embed-version's script, or WordPress's
+#                  scripts/embed.sh), or with embed_version_sync.py pin for
+#                  one that has none (Drupal),
+#               2. reads its pins at its latest stable release tag, at
+#                  alpha, and after the update,
+#               3. when alpha is out of date, opens a pull request from its
+#                  branch embed-version-sync into alpha with the update as
+#                  one fix commit, so that merging it releases the update.
+#                  The pull request starts the repository's own Tests. A
+#                  later run updates the same pull request, and closes it
+#                  once alpha is current.
+#             A repository whose alpha is current but whose latest release
+#             isn't is reported as waiting for a release.
+#   report    Writes one summary on the run's page, and posts it to Slack.
+#             It fails when a repository's pins couldn't be read or updated,
+#             or publishing failed.
+#
+# The logic is in scripts/embed_version_sync.py, whose tests are in
+# scripts/tests.
+#
+# Secrets:
+#   PAT               a GitHub classic personal access token, ghp_..., with the
+#                     public_repo scope, that may push branches and open pull
+#                     requests in the five repositories. Without it, the run
+#                     only checks and reports.
+#   SLACK_BOT_TOKEN   optional: the Smarter Slack app's bot token, with
+#                     chat:write.public, or the bot must be a member of
+#                     #general. Without it, nothing is posted.
+#------------------------------------------------------------------------------
+name: Embed Version Sync
+
+on:
+  schedule:
+    - cron: "37 13 * * 2" # weekly, Tuesday 13:37 UTC
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The @smarter.sh/ui-chat version to check against. Empty uses the latest on npm."
+        required: false
+        type: string
+        default: ""
+      base:
+        description: "The branch of each repository to update, and that the pull requests merge into."
+        required: false
+        type: string
+        default: "alpha"
+      dry-run:
+        description: "Check and report only: open no pull request, and post nothing to Slack."
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: embed-version-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  BASE: ${{ inputs.base || 'alpha' }}
+  DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+  SLACK_CHANNEL: "general"
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Find the latest @smarter.sh/ui-chat
+        id: package
+        shell: bash
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          version="$(npm view "@smarter.sh/ui-chat@${REQUESTED:-latest}" version | tail -1)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::npm has no @smarter.sh/ui-chat@${REQUESTED:-latest}"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Checking every repository against @smarter.sh/ui-chat $version."
+
+  check:
+    name: ${{ matrix.repository }}
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - repository: smarter-wordpress
+            # downloads the package into the git-ignored smarter-chat/assets/, and writes SMARTER_CHAT_EMBED_VERSION.
+            update: EMBED_VERSION="$VERSION" scripts/embed.sh
+          - repository: smarter-drupal
+            # no command of its own: libraries.yml and EmbedConfig::EMBED_VERSION, which a unit test keeps equal.
+            update: python3 -E -s "$GITHUB_WORKSPACE/scripts/embed_version_sync.py" pin --repository "smarter-sh/smarter-drupal" --version "$VERSION"
+          - repository: smarter-gtm-template
+            update: node scripts/embed-version.mjs "$VERSION"
+          - repository: smarter-shopify
+            update: node scripts/embed-version.mjs "$VERSION"
+          - repository: smarter-docs-site-generators
+            update: python3 scripts/embed_version.py "$VERSION"
+    defaults:
+      run:
+        shell: bash
+        working-directory: integration
+    env:
+      VERSION: ${{ needs.package.outputs.version }}
+    steps:
+      # this repository, for scripts/. First, because a checkout at the workspace's root would remove the others.
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # every branch and tag, to read the latest release; the token is kept for publish's push.
+      - name: Checkout ${{ matrix.repository }}
+        uses: actions/checkout@v7
+        with:
+          repository: smarter-sh/${{ matrix.repository }}
+          ref: ${{ env.BASE }}
+          path: integration
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ secrets.PAT || github.token }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Update the pins to ${{ needs.package.outputs.version }}
+        run: ${{ matrix.update }}
+
+      - name: Record the result
+        env:
+          REPOSITORY: smarter-sh/${{ matrix.repository }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/result"
+          python3 -E -s "$GITHUB_WORKSPACE/scripts/embed_version_sync.py" status \
+            --repository "$REPOSITORY" --version "$VERSION" --release-branch main \
+            --output "$RUNNER_TEMP/result/${{ matrix.repository }}.json"
+          git status --short
+
+      - name: Open, update or close the pull request
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+        run: |
+          python3 -E -s "$GITHUB_WORKSPACE/scripts/embed_version_sync.py" publish \
+            --result "$RUNNER_TEMP/result/${{ matrix.repository }}.json" --base "$BASE" --run-url "$RUN_URL"
+
+      - name: Upload the result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: embed-version-sync-${{ matrix.repository }}
+          path: ${{ runner.temp }}/result/
+          if-no-files-found: ignore
+
+  report:
+    needs: [package, check]
+    if: always() && needs.package.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Download the results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: embed-version-sync-*
+          path: ${{ runner.temp }}/results
+          merge-multiple: true
+
+      # fails when a repository's pins couldn't be read or updated, or its pull request could not be published.
+      - name: Summarize
+        shell: bash
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          python3 -E -s scripts/embed_version_sync.py report --results "$RUNNER_TEMP/results" \
+            --version "$VERSION" --run-url "$RUN_URL" --summary "$GITHUB_STEP_SUMMARY" > "$RUNNER_TEMP/slack.txt"
+
+      # One message per run. A Slack outage must never fail the run.
+      - name: Post to Slack
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          DRY_RUN_FLAG: ${{ env.DRY_RUN == 'true' && '--dry-run' || '' }}
+        run: python3 -I scripts/slack_post.py --channel "$SLACK_CHANNEL" $DRY_RUN_FLAG < "$RUNNER_TEMP/slack.txt"

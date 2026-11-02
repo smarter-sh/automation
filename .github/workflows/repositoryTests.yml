@@ -1,0 +1,100 @@
+---
+#------------------------------------------------------------------------------
+# Repository Tests.
+#
+# Every night, starts the test workflow (.github/workflows/tests.yml, or
+# test.yml) of every smarter-sh repository that isn't archived, on its default
+# branch, waits for every run, and posts the results to Slack: a clean bill of
+# health, or the suites that failed, with links to their runs. A repository
+# without a test workflow is left out; one whose workflow is disabled, or has no
+# workflow_dispatch trigger, is reported as not started.
+#
+# 08:13 UTC is 2:13 Central Standard Time (3:13 during daylight saving time),
+# so that the runs don't compete with the day's pushes and pull requests.
+# smarter's own suite, the longest, takes about 20 minutes, and runs live,
+# billable LLM requests, which is expected.
+#
+# The logic is in scripts/repository_tests.py, whose tests are in
+# scripts/tests. The runs themselves are in each repository's Actions tab;
+# this run only starts and watches them.
+#
+# Secrets:
+#   PAT               a GitHub classic personal access token, ghp_..., that may
+#                     start workflows in every smarter-sh repository. GitHub's
+#                     docs ask for the repo scope for that; a repository that
+#                     refuses public_repo alone is reported as not started,
+#                     with GitHub's HTTP 403. Without it, the run fails.
+#   SLACK_BOT_TOKEN   optional: the Smarter Slack app's bot token, with
+#                     chat:write.public, or the bot must be a member of
+#                     #general. Without it, nothing is posted.
+#------------------------------------------------------------------------------
+name: Repository Tests
+
+on:
+  schedule:
+    - cron: "13 8 * * *" # daily, 08:13 UTC (2:13 CST, 3:13 CDT)
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "The branch to test in every repository. Empty uses each one's default branch."
+        required: false
+        type: string
+        default: ""
+      dry-run:
+        description: "List the test workflows only: start none, and post nothing to Slack."
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: repository-tests
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+  SLACK_CHANNEL: "general"
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    # the script stops waiting after 75 minutes, and reports the runs still going.
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Start every test workflow, and wait for the runs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+          REF: ${{ inputs.ref }}
+        run: |
+          args=(--output "$RUNNER_TEMP/results.json" --timeout-minutes 75 --poll-seconds 60 --ref "$REF")
+          if [[ "$DRY_RUN" == "true" ]]; then args+=(--dry-run); fi
+          python3 -E -s scripts/repository_tests.py run "${args[@]}"
+
+      # fails when a suite failed, timed out, or was still running at the deadline.
+      - name: Summarize
+        if: always()
+        shell: bash
+        run: |
+          python3 -E -s scripts/repository_tests.py report --results "$RUNNER_TEMP/results.json" \
+            --run-url "$RUN_URL" --summary "$GITHUB_STEP_SUMMARY" > "$RUNNER_TEMP/slack.txt"
+
+      # One message per run. A Slack outage must never fail the run.
+      - name: Post to Slack
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          args=(--channel "$SLACK_CHANNEL")
+          if [[ "$DRY_RUN" == "true" ]]; then args+=(--dry-run); fi
+          python3 -I scripts/slack_post.py "${args[@]}" < "$RUNNER_TEMP/slack.txt"

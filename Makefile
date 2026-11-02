@@ -23,7 +23,7 @@ init: check-python
 check-python:
 	@command -v $(PYTHON) >/dev/null 2>&1 || { echo >&2 "This repository needs $(PYTHON): install it, or run make init PYTHON=/path/to/python3"; exit 1; }
 
-# The pre-commit hooks on every file: the standard, as in CI (test.yml).
+# The pre-commit hooks on every file: the standard, as in CI (tests.yml).
 lint:
 	@[ -x $(VENV)/bin/pre-commit ] || { echo "Run make init first."; exit 1; }
 	$(VENV)/bin/pre-commit run --all-files

@@ -20,12 +20,12 @@ pull request that brings the copy up to date.
 Usage: ``status`` and ``publish`` from the root of the repository's checkout, with this script's
 path in the automation checkout; ``report`` from anywhere::
 
-    python3 -I scripts/api_contract_sync.py status --repository smarter-sh/smarter-python \\
+    python3 -E -s scripts/api_contract_sync.py status --repository smarter-sh/smarter-python \\
         --tag v0.40.4 --sha <full sha> --shipped smarter/models/sam \\
         --baseline success --tests failure --output result.json
-    python3 -I scripts/api_contract_sync.py publish --result result.json --base alpha \\
+    python3 -E -s scripts/api_contract_sync.py publish --result result.json --base alpha \\
         --run-url URL [--dry-run]
-    python3 -I scripts/api_contract_sync.py report --results DIR --tag v0.40.4 --run-url URL \\
+    python3 -E -s scripts/api_contract_sync.py report --results DIR --tag v0.40.4 --run-url URL \\
         --summary "$GITHUB_STEP_SUMMARY" | python3 -I scripts/slack_post.py --channel general
 
 Before ``status`` runs, the workflow has already, in the repository's checkout:
@@ -54,9 +54,10 @@ Then the three commands do this:
 It uses only Python's standard library, because the workflow's runner has no virtual environment:
 
 - ``argparse`` reads the command line, with one subcommand per step.
-- ``subprocess`` runs ``git`` and ``gh`` with an argument list, never through a shell, so that no
-  argument is ever interpreted as shell syntax. Every call goes through :func:`run`, which the
-  tests replace with a fake.
+- ``github_cli.run`` (this folder's ``github_cli.py``) runs ``git`` and ``gh`` with an argument
+  list, never through a shell, so that no argument is ever interpreted as shell syntax. Every call
+  goes through it, and the tests replace it with a fake. Because of that import, the workflow runs
+  this script with ``python3 -E -s``, not ``-I``, which would leave this folder off ``sys.path``.
 - ``dataclasses.dataclass`` writes :class:`Result`'s ``__init__`` from its annotated fields, and
   ``asdict()`` turns it into the JSON that the workflow passes between its jobs.
 - ``json``, ``os``, ``pathlib`` and ``sys`` read and write the result files, the environment and the
@@ -70,6 +71,8 @@ import subprocess  # nosec B404: runs git and gh with fixed arguments
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+from github_cli import error_line, run
 
 LABEL = "api-contract"
 """The label of the issue that this workflow opens in each repository.
@@ -246,31 +249,6 @@ class Result:  # pylint: disable=too-many-instance-attributes
         :param path: The file to write.
         """
         Path(path).write_text(json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8")
-
-
-def run(*args: str, check: bool = True, input_text: str | None = None, strip: bool = True) -> str:
-    """
-    Run a command, without a shell, and return what it printed.
-
-    Every ``git`` and ``gh`` call of this script goes through this function, so that the tests can
-    replace it with a fake, and nothing in them reaches git or GitHub.
-
-    :param args: The command and its arguments, e.g. ``("gh", "issue", "list", ...)``.
-    :param check: Raise when the command fails. ``gh pr ready`` passes False, because it fails
-        when the pull request already is in the state it asks for.
-    :param input_text: Text to write to the command's standard input, e.g. an issue's body for
-        ``--body-file -``. Long Markdown passes through stdin rather than as an argument.
-    :param strip: Remove the output's leading and trailing white space, e.g. the newline after a
-        url. ``git status --porcelain`` passes False, because its first line can start with a
-        space that is part of the line's status, e.g. `` M``.
-    :returns: The command's standard output.
-    :raises subprocess.CalledProcessError: When ``check`` is True and the command exits with a
-        status other than 0. Its ``stderr`` holds the command's error message.
-    """
-    completed = subprocess.run(  # nosec B603: fixed commands, arguments are never interpreted by a shell
-        list(args), check=check, capture_output=True, text=True, input=input_text
-    )
-    return completed.stdout.strip() if strip else completed.stdout
 
 
 def parse_porcelain(text: str) -> list[str]:
@@ -843,8 +821,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             publish(result, args.base, args.run_url, args.dry_run)
         except subprocess.CalledProcessError as error:
-            last_line = ((error.stderr or "").strip().splitlines() or [str(error)])[-1]
-            result.error = f"publishing failed: {last_line}"
+            result.error = f"publishing failed: {error_line(error)}"
             print(f"{result.repository}: {result.error}", file=sys.stderr)
             result.save(args.result)
             return 1
