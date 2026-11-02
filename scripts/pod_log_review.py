@@ -175,7 +175,12 @@ class Settings:  # pylint: disable=too-many-instance-attributes
         """
 
         def env(name: str, default: str = "") -> str:
-            """Return an environment variable, or ``default`` if it isn't set or is empty."""
+            """Read an environment variable, falling back when it is unset or empty.
+
+            :param name: The environment variable's name.
+            :param default: The value to return when the variable is unset or empty.
+            :returns: The variable's value, or ``default``.
+            """
             return os.environ.get(name, "") or default
 
         return cls(
@@ -199,12 +204,18 @@ class Settings:  # pylint: disable=too-many-instance-attributes
 
     @property
     def claude_dir(self) -> str:
-        """The folder that holds the MCP configuration, with the GitHub token, and the stream."""
+        """Return the folder holding the MCP configuration and review stream.
+
+        :returns: The path under :attr:`runner_temp` used for Claude Code files.
+        """
         return os.path.join(self.runner_temp, "claude")
 
     @property
     def stream_path(self) -> str:
-        """Claude Code's stream-json output."""
+        """Return Claude Code's stream-JSON output path.
+
+        :returns: The path to ``stream.jsonl`` under :attr:`claude_dir`.
+        """
         return os.path.join(self.claude_dir, "stream.jsonl")
 
 
@@ -346,6 +357,7 @@ def succeeded(status: int, result: ReviewResult | None) -> bool:
 
     :param status: Claude Code's exit status.
     :param result: How the run ended, or None if it never finished.
+    :returns: Whether the command exited successfully and produced a non-error result.
     """
     return status == 0 and result is not None and not result.is_error
 
@@ -361,6 +373,7 @@ def worth_retrying(result: ReviewResult | None, writes: int) -> bool:
 
     :param result: How the run ended, or None if it never finished.
     :param writes: How many times it called a tool that writes to GitHub.
+    :returns: Whether retrying is safe and may recover from a transient failure.
     """
     if writes:
         return False

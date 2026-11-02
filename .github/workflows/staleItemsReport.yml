@@ -1,0 +1,82 @@
+---
+#------------------------------------------------------------------------------
+# Stale Items Report.
+#
+# Every Thursday night Central time, reports open pull requests and issues
+# older than one calendar month across every active smarter-sh repository.
+# It reports only and never closes or comments on items. Findings go to
+# #general; the public run summary contains counts only.
+#
+# The logic is in scripts/organization_health.py, whose tests are in scripts/tests.
+#
+# Secrets:
+#   ORG_AUDIT_TOKEN  a GitHub token with repository issues and organization
+#                    metadata read access. Its owner must be able to read every
+#                    organization's repository.
+#   SLACK_BOT_TOKEN  optional: chat:write.public, or the bot must be a member
+#                    of #general. Without it, nothing is posted.
+#------------------------------------------------------------------------------
+name: Stale Items Report
+
+on:
+  schedule:
+    - cron: "17 2 * * 5" # Thursday 20:17 CST / 21:17 CDT
+  workflow_dispatch:
+    inputs:
+      months:
+        description: "Positive whole number of calendar months; defaults to 1."
+        required: false
+        type: number
+        default: 1
+      dry-run:
+        description: "Check and report counts only; post nothing to Slack."
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: stale-items-report
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+  MONTHS: ${{ inputs.months }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Find stale open items
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.ORG_AUDIT_TOKEN }}
+        run: |
+          python3 -E -s scripts/organization_health.py run stale \
+            --months "${MONTHS:-1}" --results "$RUNNER_TEMP/results.json"
+
+      - name: Summarize findings
+        if: always()
+        shell: bash
+        run: |
+          python3 -E -s scripts/organization_health.py report \
+            --results "$RUNNER_TEMP/results.json" \
+            --run-url "$RUN_URL" --summary "$GITHUB_STEP_SUMMARY" \
+            --slack-output "$RUNNER_TEMP/slack.txt"
+
+      - name: Post findings to Slack
+        if: always() && env.DRY_RUN != 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: python3 -I scripts/slack_post.py --channel general < "$RUNNER_TEMP/slack.txt"

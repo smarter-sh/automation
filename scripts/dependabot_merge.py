@@ -254,7 +254,11 @@ def process_all(organization: str, run_url: str, dry_run: bool, sleep=time.sleep
 
 
 def failed(result: Result) -> bool:
-    """Whether a result fails the job's run: a ``gh`` call failed."""
+    """Whether a result fails the job's run because a ``gh`` call failed.
+
+    :param result: The repository pull request's result.
+    :returns: Whether the result records a ``gh`` error.
+    """
     return bool(result.error)
 
 

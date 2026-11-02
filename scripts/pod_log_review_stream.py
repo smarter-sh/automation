@@ -119,7 +119,12 @@ class ReviewResult:
 
     @property
     def transient_api_error(self) -> bool:
-        """Whether the run ended on an API error that a later attempt may not get: 429 rate limited, or a 5xx such as 529 overloaded."""
+        """Return whether the run ended on a transient API error.
+
+        A later attempt may recover from a rate limit (429) or a server error (5xx).
+
+        :returns: Whether the API status is 429 or in the 500–599 range.
+        """
         status = self.api_error_status
         return status is not None and (status == 429 or 500 <= status <= 599)
 
@@ -148,10 +153,16 @@ class ReviewResult:
         The last non-empty line must be exactly ``Verdict: healthy``, ignoring case and Markdown
         emphasis (``*``, ``_``, backticks). Any other ending, such as ``Verdict: healthy, but ...``,
         is not healthy, so that only the verdict, never free text, decides it.
+
+        :returns: Whether the final answer gives the healthy verdict and the run has no error.
         """
         if self.is_error or not self.answer:
             return False
-        lines = [line.strip() for line in self.answer.splitlines() if line.strip()]
+        lines = []
+        for line in self.answer.splitlines():
+            cleaned = line.strip()
+            if cleaned:
+                lines.append(cleaned)
         return bool(lines) and lines[-1].strip("*_` ").lower() == HEALTHY_VERDICT
 
 
@@ -187,10 +198,15 @@ class PodInventory:
             return cls()
         pods = pods_by_deployment(log_dir)
         names = {pod for deployment_pods in pods.values() for pod in deployment_pods}
+        pod_counts = {deployment: len(deployment_pods) for deployment, deployment_pods in pods.items()}
+        pods_path = os.path.join(log_dir, "inventory", "pods.txt")
+        images_path = os.path.join(log_dir, "inventory", "images.txt")
+        restarts = total_restarts(pods_path, names)
+        releases = running_releases(images_path)
         return cls(
-            pods={deployment: len(deployment_pods) for deployment, deployment_pods in pods.items()},
-            restarts=total_restarts(os.path.join(log_dir, "inventory", "pods.txt"), names),
-            releases=running_releases(os.path.join(log_dir, "inventory", "images.txt")),
+            pods=pod_counts,
+            restarts=restarts,
+            releases=releases,
         )
 
 
@@ -222,7 +238,10 @@ def pods_by_deployment(log_dir: str) -> dict[str, list[str]]:
         folder = os.path.join(log_dir, deployment)
         if deployment == "inventory" or not os.path.isdir(folder):
             continue
-        logs = [name for name in os.listdir(folder) if name.endswith(".log") and not name.endswith(".previous.log")]
+        logs = []
+        for name in os.listdir(folder):
+            if name.endswith(".log") and not name.endswith(".previous.log"):
+                logs.append(name)
         if logs:
             pods[deployment] = [name.removesuffix(".log") for name in logs]
     return pods
@@ -242,7 +261,12 @@ def total_restarts(path: str, pod_names: set[str]) -> int | None:
     rows = read_rows(path)
     if rows is None:
         return None
-    return sum(int(row[3]) for row in rows if len(row) > 3 and row[0] in pod_names and row[3].isdigit())
+    restarts = 0
+    for row in rows:
+        if len(row) <= 3 or row[0] not in pod_names or not row[3].isdigit():
+            continue
+        restarts += int(row[3])
+    return restarts
 
 
 def running_releases(path: str) -> list[str]:
@@ -257,9 +281,15 @@ def running_releases(path: str) -> list[str]:
     """
     tags: list[str] = []
     for row in read_rows(path) or []:
-        if len(row) != 3 or not row[1].isdigit() or int(row[1]) == 0 or ":" not in row[2]:
+        if len(row) != 3:
             continue
-        tag = row[2].rpartition(":")[2]
+        replicas = row[1]
+        if not replicas.isdigit() or int(replicas) == 0:
+            continue
+        image = row[2]
+        if ":" not in image:
+            continue
+        tag = image.rpartition(":")[2]
         if IMAGE_TAG.match(tag) and tag not in tags:
             tags.append(tag)
     return tags
@@ -334,9 +364,12 @@ def write_attempts(path: str) -> int:
     :param path: The stream-json output of the run.
     :returns: The number of calls of :data:`WRITE_TOOLS`.
     """
-    return sum(
-        1
-        for event in events(path)
-        for block in content_blocks(event)
-        if block.get("type") == "tool_use" and tool_name(str(block.get("name", ""))) in WRITE_TOOLS
-    )
+    attempts = 0
+    for event in events(path):
+        for block in content_blocks(event):
+            if block.get("type") != "tool_use":
+                continue
+            name = tool_name(str(block.get("name", "")))
+            if name in WRITE_TOOLS:
+                attempts += 1
+    return attempts

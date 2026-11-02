@@ -1,0 +1,76 @@
+---
+#------------------------------------------------------------------------------
+# Workflow Security Review.
+#
+# Every Tuesday night Central time, checks every smarter-sh repository's
+# default-branch Actions workflows for third-party actions not pinned to a
+# full commit SHA, missing explicit token permissions, write permissions, and
+# jobs without timeouts. It reports findings to #general and changes nothing.
+# The public run summary contains counts only.
+#
+# The logic is in scripts/organization_health.py, whose tests are in scripts/tests.
+#
+# Secrets:
+#   ORG_AUDIT_TOKEN  a GitHub token with repository contents and organization
+#                    metadata read access. Its owner must be able to read every
+#                    organization's repository.
+#   SLACK_BOT_TOKEN  optional: chat:write.public, or the bot must be a member
+#                    of #general. Without it, nothing is posted.
+#------------------------------------------------------------------------------
+name: Workflow Security Review
+
+on:
+  schedule:
+    - cron: "37 1 * * 3" # Tuesday 19:37 CST / 20:37 CDT
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Check and report counts only; post nothing to Slack."
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: workflow-security-review
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Review workflow files
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.ORG_AUDIT_TOKEN }}
+        run: |
+          python3 -E -s scripts/organization_health.py run workflow \
+            --results "$RUNNER_TEMP/results.json"
+
+      - name: Summarize findings
+        if: always()
+        shell: bash
+        run: |
+          python3 -E -s scripts/organization_health.py report \
+            --results "$RUNNER_TEMP/results.json" --run-url "$RUN_URL" \
+            --summary "$GITHUB_STEP_SUMMARY" --slack-output "$RUNNER_TEMP/slack.txt"
+
+      - name: Post findings to Slack
+        if: always() && env.DRY_RUN != 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: python3 -I scripts/slack_post.py --channel general < "$RUNNER_TEMP/slack.txt"

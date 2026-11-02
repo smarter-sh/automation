@@ -54,7 +54,8 @@ def post(channel: str, text: str, token: str, unfurl: bool = False) -> dict:
 def main(argv: list[str] | None = None) -> int:
     """Read the message from stdin, then print it (--dry-run) or post it.
 
-    Returns the exit code.
+    :param argv: Optional command-line arguments, excluding the program name.
+    :returns: 0 if no post is needed or Slack accepts it; otherwise 1.
     """
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--channel", required=True, help="A channel name, e.g. smarter, or id.")

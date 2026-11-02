@@ -35,7 +35,9 @@ def run(*args: str, check: bool = True, input_text: str | None = None, strip: bo
     completed = subprocess.run(  # nosec B603: fixed commands, arguments are never interpreted by a shell
         list(args), check=check, capture_output=True, text=True, input=input_text
     )
-    return completed.stdout.strip() if strip else completed.stdout
+    if strip:
+        return completed.stdout.strip()
+    return completed.stdout
 
 
 def run_json(*args: str):
@@ -49,7 +51,9 @@ def run_json(*args: str):
     :raises ValueError: When it printed something that isn't JSON.
     """
     text = run(*args)
-    return json.loads(text) if text else None
+    if not text:
+        return None
+    return json.loads(text)
 
 
 def error_line(error: subprocess.CalledProcessError) -> str:
@@ -62,7 +66,11 @@ def error_line(error: subprocess.CalledProcessError) -> str:
     :param error: The failure that :func:`run` raised.
     :returns: The last non-empty line of its standard error, or the exception's own text.
     """
-    return ((error.stderr or "").strip().splitlines() or [str(error)])[-1]
+    stderr = error.stderr or ""
+    lines = stderr.strip().splitlines()
+    if not lines:
+        return str(error)
+    return lines[-1]
 
 
 def repositories(organization: str = ORGANIZATION) -> list[dict]:
@@ -78,8 +86,9 @@ def repositories(organization: str = ORGANIZATION) -> list[dict]:
         "gh", "repo", "list", organization, "--no-archived", "--limit", "1000",
         "--json", "nameWithOwner,defaultBranchRef",
     )  # fmt: skip
-    found = [
-        {"name": item["nameWithOwner"], "default_branch": (item.get("defaultBranchRef") or {}).get("name") or "main"}
-        for item in items or []
-    ]
+    found = []
+    for item in items or []:
+        branch = item.get("defaultBranchRef") or {}
+        default_branch = branch.get("name") or "main"
+        found.append({"name": item["nameWithOwner"], "default_branch": default_branch})
     return sorted(found, key=lambda item: item["name"])

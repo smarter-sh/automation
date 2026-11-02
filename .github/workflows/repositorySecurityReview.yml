@@ -1,0 +1,76 @@
+---
+#------------------------------------------------------------------------------
+# Repository Security Review.
+#
+# Every Monday night Central time, reviews Actions token defaults, default
+# branch protections, secret scanning, and Dependabot alerts/security updates
+# across every smarter-sh repository. It reports deviations to #general and
+# changes nothing. The public run summary contains counts only.
+#
+# The logic is in scripts/organization_health.py, whose tests are in scripts/tests.
+#
+# Secrets:
+#   ORG_AUDIT_TOKEN  a GitHub token with read access to repository settings and
+#                    organization metadata. Its owner must be an organization
+#                    owner with admin access to every repository. A classic
+#                    PAT needs repo and admin:org scopes.
+#   SLACK_BOT_TOKEN  optional: chat:write.public, or the bot must be a member
+#                    of #general. Without it, nothing is posted.
+#------------------------------------------------------------------------------
+name: Repository Security Review
+
+on:
+  schedule:
+    - cron: "17 1 * * 2" # Monday 19:17 CST / 20:17 CDT
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Check and report counts only; post nothing to Slack."
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: repository-security-review
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Review repository security settings
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.ORG_AUDIT_TOKEN }}
+        run: |
+          python3 -E -s scripts/organization_health.py run security \
+            --results "$RUNNER_TEMP/results.json"
+
+      - name: Summarize findings
+        if: always()
+        shell: bash
+        run: |
+          python3 -E -s scripts/organization_health.py report \
+            --results "$RUNNER_TEMP/results.json" --run-url "$RUN_URL" \
+            --summary "$GITHUB_STEP_SUMMARY" --slack-output "$RUNNER_TEMP/slack.txt"
+
+      - name: Post findings to Slack
+        if: always() && env.DRY_RUN != 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: python3 -I scripts/slack_post.py --channel general < "$RUNNER_TEMP/slack.txt"

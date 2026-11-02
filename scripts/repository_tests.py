@@ -91,7 +91,10 @@ class Result:
 
     @property
     def failed(self) -> bool:
-        """Whether this repository fails the job's run."""
+        """Return whether this repository fails the job's run.
+
+        :returns: Whether :attr:`status` is one of the failed statuses.
+        """
         return self.status in FAILED
 
 
@@ -362,7 +365,10 @@ def main(argv: list[str] | None = None) -> int:
         with open(args.summary, "a", encoding="utf-8") as summary:
             summary.write(summary_markdown(results, args.run_url))
     print(slack_message(results, args.run_url))
-    return 1 if not results or any(result.failed for result in results) else 0
+    if not results:
+        return 1
+    has_failed_result = any(result.failed for result in results)
+    return 1 if has_failed_result else 0
 
 
 if __name__ == "__main__":

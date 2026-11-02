@@ -101,7 +101,18 @@ class Pin:
         :param version: The new version.
         :returns: The new contents.
         """
-        return re.sub(self.pattern, lambda match: match.group(0).replace(match.group(1), version), text)
+
+        def replace_version(match: re.Match) -> str:
+            """Replace the matched old version without changing surrounding text.
+
+            :param match: A match of the pin's regular expression.
+            :returns: The complete matched text with its version updated.
+            """
+            whole_match = match.group(0)
+            old_version = match.group(1)
+            return whole_match.replace(old_version, version)
+
+        return re.sub(self.pattern, replace_version, text)
 
 
 PINS: dict[str, tuple[Pin, ...]] = {
@@ -170,7 +181,10 @@ class Result:  # pylint: disable=too-many-instance-attributes
 
     @property
     def verdict(self) -> str:
-        """The repository's state, one of :data:`VERDICT_TEXT`'s keys."""
+        """Return the repository's state, one of :data:`VERDICT_TEXT`'s keys.
+
+        :returns: ``"error"``, ``"current"``, ``"unreleased"``, or ``"outdated"``.
+        """
         if self.error or not self.updated or any(pin != self.version for pin in self.updated):
             return "error"
         if self.released and all(pin == self.version for pin in self.released):
@@ -181,8 +195,13 @@ class Result:  # pylint: disable=too-many-instance-attributes
 
     @property
     def shipped(self) -> str:
-        """The version that the latest release loads, for the report, e.g. ``0.9.0``, or ``none``."""
-        return ", ".join(sorted(set(self.released))) or "none"
+        """Return the version that the latest release loads, for the report.
+
+        :returns: The unique released pin versions, or ``"none"`` when there are none.
+        """
+        unique_versions = set(self.released)
+        sorted_versions = sorted(unique_versions)
+        return ", ".join(sorted_versions) or "none"
 
     @classmethod
     def load(cls, path: str | Path) -> "Result":
@@ -194,7 +213,8 @@ class Result:  # pylint: disable=too-many-instance-attributes
         :param path: The result's JSON file.
         :returns: The result.
         """
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        text = Path(path).read_text(encoding="utf-8")
+        data = json.loads(text)
         return cls(**{key: value for key, value in data.items() if key in cls.__dataclass_fields__})
 
     def save(self, path: str | Path) -> None:
@@ -280,7 +300,12 @@ def changed_files() -> list[str]:
     :returns: The changed paths, sorted. Files that git ignores, e.g. WordPress's downloaded
         ``smarter-chat/assets/embed.js``, are not among them.
     """
-    paths = {line[3:].strip('"') for line in run("git", "status", "--porcelain", strip=False).splitlines() if line}
+    status = run("git", "status", "--porcelain", strip=False)
+    paths = set()
+    for line in status.splitlines():
+        if line:
+            path = line[3:].strip('"')
+            paths.add(path)
     return sorted(paths)
 
 
@@ -334,24 +359,26 @@ def pull_request_body(result: Result, run_url: str) -> str:
     """
     released = f"{result.release_tag} loads {result.shipped}" if result.release_tag else "There is no release yet"
     files = "\n".join(f"- `{path}`" for path in result.changed) or "- (none)"
-    return "\n".join(
-        [
-            f"Updates the embed script that this repository loads to the latest `{PACKAGE}` on npm, "
-            f"[{result.version}](https://www.npmjs.com/package/{PACKAGE}/v/{result.version}).",
-            "",
-            f"{released}. This branch loads {', '.join(sorted(set(result.base))) or 'none'}.",
-            "",
-            "Changed files:",
-            "",
-            files,
-            "",
-            "Check the package's release notes for a change in the embed script's options, and the tests on this pull "
-            "request. A merged `fix` releases the update.",
-            "",
-            f"Opened by The Smarter Project's weekly [Embed Version Sync]({run_url}) workflow. A later run force-pushes "
-            f"the branch `{BRANCH}` with the newest update, and closes this pull request once the base is current.",
-        ]
-    )
+    base_versions = set(result.base)
+    sorted_base_versions = sorted(base_versions)
+    base_version_text = ", ".join(sorted_base_versions) or "none"
+    lines = [
+        f"Updates the embed script that this repository loads to the latest `{PACKAGE}` on npm, "
+        f"[{result.version}](https://www.npmjs.com/package/{PACKAGE}/v/{result.version}).",
+        "",
+        f"{released}. This branch loads {base_version_text}.",
+        "",
+        "Changed files:",
+        "",
+        files,
+        "",
+        "Check the package's release notes for a change in the embed script's options, and the tests on this pull "
+        "request. A merged `fix` releases the update.",
+        "",
+        f"Opened by The Smarter Project's weekly [Embed Version Sync]({run_url}) workflow. A later run force-pushes "
+        f"the branch `{BRANCH}` with the newest update, and closes this pull request once the base is current.",
+    ]
+    return "\n".join(lines)
 
 
 def find_pull_request(repository: str) -> dict | None:

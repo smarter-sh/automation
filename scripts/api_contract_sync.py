@@ -239,7 +239,8 @@ class Result:  # pylint: disable=too-many-instance-attributes
         :raises ValueError: When it isn't JSON.
         :raises TypeError: When it lacks a required field, e.g. ``repository``.
         """
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        text = Path(path).read_text(encoding="utf-8")
+        data = json.loads(text)
         return cls(**{key: value for key, value in data.items() if key in cls.__dataclass_fields__})
 
     def save(self, path: str | Path) -> None:
@@ -832,7 +833,10 @@ def main(argv: list[str] | None = None) -> int:
         with open(args.summary, "a", encoding="utf-8") as summary:
             summary.write(summary_markdown(results, args.tag, args.run_url))
     print(slack_message(results, args.tag, args.run_url))
-    return 1 if not results or any(result.verdict in ("broken", "failing") or result.error for result in results) else 0
+    if not results:
+        return 1
+    has_failed_result = any(result.verdict in ("broken", "failing") or result.error for result in results)
+    return 1 if has_failed_result else 0
 
 
 if __name__ == "__main__":

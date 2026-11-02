@@ -8,6 +8,13 @@ description: Start here for any change to the smarter-sh/automation repository (
 This repository is a set of cron jobs: `.github/workflows/*.yml`, plus the scripts in `scripts/` that they run.
 Each job works on _other_ `smarter-sh` repositories. `CLAUDE.md` has the hard rules; this skill explains them.
 
+## Code style
+
+Write Python for people who are learning how to program in Python. Prefer plain, familiar syntax, descriptive names,
+and explicit steps over clever or compressed code. Aim for roughly one operation per line, but use judgment rather
+than treating this as a hard rule. When a line or condition combines several transformations or checks (especially
+around five), name intermediate values or split the logic into steps. Keep simple, familiar expressions concise. Emphasize clarity and readability over brevity. Use comments to explain why, not what, and avoid repeating the code in the comment.
+
 ## Which skill to load
 
 | Task                                                          | Skill                    |

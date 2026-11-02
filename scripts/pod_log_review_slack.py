@@ -89,7 +89,13 @@ def result_text(content: object) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "\n".join(str(block.get("text", "")) for block in content if isinstance(block, dict))
+        lines = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            text = str(block.get("text", ""))
+            lines.append(text)
+        return "\n".join(lines)
     return ""
 
 
@@ -100,7 +106,9 @@ def escape(text: str) -> str:
     :param text: The text.
     :returns: The text with ``&``, ``<`` and ``>`` replaced by their entities.
     """
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    escaped = text.replace("&", "&amp;")
+    escaped = escaped.replace("<", "&lt;")
+    return escaped.replace(">", "&gt;")
 
 
 def actions(path: str) -> list[str]:
@@ -157,6 +165,7 @@ def footer(run_url: str) -> str:
     Return the message's last line: a link to the workflow run, and who wrote the message.
 
     :param run_url: The workflow run's url, or an empty string for none.
+    :returns: The footer line, with the run link when one is available.
     """
     return f"<{run_url}|Workflow run> · written by Claude Code" if run_url else "written by Claude Code"
 
