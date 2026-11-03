@@ -1,6 +1,7 @@
 """Tests for the organization-wide health reports; no test contacts external services."""
 
 import base64
+import io
 import json
 import subprocess
 import tempfile
@@ -311,10 +312,46 @@ class TestReports(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             results_path = Path(directory) / "results.json"
-            with mock.patch.object(health, "scan_security", return_value=results):
+            with (
+                mock.patch.dict(health.os.environ, {"GH_TOKEN": "test-token"}),
+                mock.patch.object(health, "scan_security", return_value=results),
+                mock.patch("sys.stderr", new_callable=io.StringIO),
+            ):
                 status = health.main(["run", "security", "--results", str(results_path)])
             self.assertEqual(json.loads(results_path.read_text(encoding="utf-8")), results)
         self.assertEqual(status, 1)
+
+    def test_scan_command_reports_an_empty_token_without_scanning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            results_path = Path(directory) / "results.json"
+            with (
+                mock.patch.dict(health.os.environ, {"GH_TOKEN": ""}),
+                mock.patch.object(health, "scan_security") as scan,
+                mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
+                status = health.main(["run", "security", "--results", str(results_path)])
+            results = json.loads(results_path.read_text(encoding="utf-8"))
+        self.assertEqual(status, 1)
+        scan.assert_not_called()
+        self.assertEqual(results["kind"], "security")
+        self.assertEqual(
+            list(results["errors"]),
+            ["GH_TOKEN is empty: is the GH_TOKEN organization secret available to this repository?"],
+        )
+        self.assertIn("organization secret", stderr.getvalue())
+
+    def test_empty_token_results_still_make_a_stale_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            results_path = Path(directory) / "results.json"
+            with (
+                mock.patch.dict(health.os.environ, {"GH_TOKEN": ""}),
+                mock.patch("sys.stderr", new_callable=io.StringIO),
+            ):
+                health.main(["run", "stale", "--results", str(results_path)])
+            message = health.slack_message(
+                json.loads(results_path.read_text(encoding="utf-8")), "https://example.test/run"
+            )
+        self.assertIn("Scan incomplete", message)
 
 
 if __name__ == "__main__":

@@ -32,6 +32,7 @@ import argparse
 import base64
 import calendar
 import json
+import os
 import re
 import subprocess  # nosec B404: runs fixed gh and package-manager commands
 import sys
@@ -879,9 +880,15 @@ def main(argv: list[str] | None = None) -> int:
         write_report(results, args.run_url, args.summary, args.slack_output)
         return 0
 
-    if args.kind == "stale":
-        if args.months < 1:
-            parser.error("--months must be a positive integer")
+    if args.kind == "stale" and args.months < 1:
+        parser.error("--months must be a positive integer")
+    if not os.environ.get("GH_TOKEN"):
+        # Without a token every API call fails; say so once instead of counting failures.
+        results = new_results(args.kind)
+        results["errors"]["GH_TOKEN is empty: is the GH_TOKEN organization secret available to this repository?"] = 1
+        if args.kind == "stale":
+            results.update(months=args.months, cutoff="n/a")
+    elif args.kind == "stale":
         results = scan_stale(args.months)
     else:
         results = {
@@ -890,6 +897,14 @@ def main(argv: list[str] | None = None) -> int:
             "packages": scan_packages,
         }[args.kind]()
     Path(args.results).write_text(json.dumps(results), encoding="utf-8")
+    # Counts and error categories only: the log is public.
+    print(
+        f"{results['repositories_scanned']} repositories checked, {len(results['findings'])} finding(s), "
+        f"{sum(results['errors'].values())} API error(s).",
+        file=sys.stderr,
+    )
+    for error, count in sorted(results["errors"].items()):
+        print(f"error: {error}: {count}", file=sys.stderr)
     return 1 if results["findings"] or results["errors"] else 0
 
 
