@@ -4,7 +4,8 @@
 The four scans read metadata from every repository in the ``smarter-sh`` organization:
 
 ``security``
-    Check Actions token defaults, branch protection, secret scanning, and Dependabot settings.
+    Check Actions token defaults, branch protection, secret scanning, and Dependabot settings
+    of the public repositories.
 ``workflow``
     Check workflow files for full-SHA action pins, explicit token permissions, and job timeouts.
 ``packages``
@@ -136,9 +137,6 @@ def status_code(error: subprocess.CalledProcessError) -> str:
     return match.group(1) if match else "unknown"
 
 
-PAID_PLAN_ONLY = "GitHub's Free plan doesn't offer this for private repositories."
-
-
 def new_results(kind: str) -> dict:
     """Create the common results document.
 
@@ -196,7 +194,11 @@ def scan_security() -> dict:
     :returns: The scan results with findings and counts of incomplete API requests.
     """
     results = new_results("security")
-    for item in list_repositories(results):
+    # Private repositories are skipped: on GitHub's Free plan they have no branch protection or
+    # secret scanning, and their settings endpoints answer with errors (403s, sometimes 503s).
+    repositories = [item for item in list_repositories(results) if item.get("private") is False]
+    results["repositories_scanned"] = len(repositories)
+    for item in repositories:
         repository = item.get("full_name")
         default_branch = item.get("default_branch")
         if not isinstance(repository, str) or not repository.startswith(f"{ORGANIZATION}/"):
@@ -207,10 +209,7 @@ def scan_security() -> dict:
         try:
             details = github_json(base) or {}
             security = details.get("security_and_analysis")
-            if security is None and details.get("private"):
-                # GitHub's Free plan offers no secret scanning for private repositories.
-                add_finding(results, repository, "Secret scanning", f"Not available: {PAID_PLAN_ONLY}", web_url)
-            elif not isinstance(security, dict):
+            if not isinstance(security, dict):
                 raise ValueError("security settings are unavailable")
             elif (security.get("secret_scanning") or {}).get("status") != "enabled":
                 add_finding(results, repository, "Secret scanning", "Secret scanning is not enabled.", web_url)
@@ -263,14 +262,6 @@ def scan_security() -> dict:
                     repository,
                     "Default branch protection",
                     f"The {default_branch} branch has no protection rules.",
-                    f"{web_url}/settings/branches",
-                )
-            elif status_code(error) == "403" and "Upgrade to GitHub Pro" in error_line(error):
-                add_finding(
-                    results,
-                    repository,
-                    "Default branch protection",
-                    f"The {default_branch} branch can't be protected: {PAID_PLAN_ONLY}",
                     f"{web_url}/settings/branches",
                 )
             else:

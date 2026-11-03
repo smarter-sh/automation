@@ -4,8 +4,9 @@
 #
 # Every Monday night Central time, reviews Actions token defaults, default
 # branch protections, secret scanning, and Dependabot alerts/security updates
-# across every smarter-sh repository. It reports deviations to #general and
-# changes nothing. The public run summary contains counts only.
+# across every public smarter-sh repository (private ones have none of these
+# on GitHub's Free plan). It reports deviations to #general and changes
+# nothing. The public run summary contains counts only.
 #
 # The logic is in scripts/organization_health.py, whose tests are in scripts/tests.
 #
