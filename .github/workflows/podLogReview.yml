@@ -2,9 +2,10 @@
 #------------------------------------------------------------------------------
 # Daily Pod Log Review.
 #
-# Downloads the logs of a deployed environment's running pods (the app server,
-# the Celery workers and beat), redacts credentials and personal data from
-# them, and has Claude Code review them, following this repository's
+# Reads the logs of a deployed environment's pods (the app server, the Celery
+# workers, beat and MariaDB) from the environment's Loki, which keeps 72 hours of
+# every pod's log, including pods that no longer run, redacts credentials and
+# personal data from them, and has Claude Code review them, following this repository's
 # .github/prompts/pod-log-review.md and smarter's smarter-pod-log-review skill.
 # Claude runs in a checkout of smarter-sh/smarter (smarter/, with its full
 # history, beside this repository's automation/), diagnoses each problem against the code, and keeps smarter's
@@ -16,8 +17,15 @@
 # Runs daily, on the default branch, against prod, and by hand against any
 # environment.
 #
+# Logs. smarter's download-logs.sh writes the inventory (pods, events, images)
+# and the running pods' logs with kubectl. pod_log_loki.py then replaces those
+# logs with the whole period's, from Loki, through a kubectl port-forward to the
+# namespace's smarter-loki Service: no new secret, and no new host. If Loki
+# cannot be read, the kubectl logs stay, the run's log gets a warning, and the
+# review is told why, in inventory/log-source.txt.
+#
 # Code. The workflow's Python scripts are in scripts/, the repository's home
-# for code that workflows run: pod_log_redact.py, pod_log_review.py,
+# for code that workflows run: pod_log_loki.py, pod_log_redact.py, pod_log_review.py,
 # pod_log_review_stream.py and pod_log_review_slack.py, which posts through
 # slack_post.py like every workflow's Slack step. Their tests are in
 # scripts/tests. They use only the
@@ -35,7 +43,8 @@
 #   ANTHROPIC_API_KEY                   Claude Code, billed to Anthropic API credit, when
 #                                       CLAUDE_CODE_OAUTH_TOKEN is not set.
 #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, EKS_CLUSTER_NAME
-#                                       read the pods' logs (kubectl get, describe, logs).
+#                                       read the inventory and the pods' logs (kubectl get,
+#                                       describe, logs), and Loki, through a port-forward.
 #   PAT                                 a GitHub classic personal access token, ghp_...,
 #                                       with the public_repo scope. It is sent only to the
 #                                       MCP server, which writes the issues, comments and
@@ -87,7 +96,7 @@ on:
           - beta
           - next
       since:
-        description: "How far back to read each pod's log, e.g. 25h. Empty reads all that each container kept."
+        description: "How far back to read each pod's log, e.g. 25h. Empty reads all that Loki keeps, 72 hours."
         required: false
         type: string
         default: "25h"
@@ -248,6 +257,16 @@ jobs:
         run: |
           "$SMARTER_DIR/skills/smarter-pod-log-review/scripts/download-logs.sh" "$EKS_CLUSTER_NAME" "$NAMESPACE" "$LOG_DIR" "$SINCE"
 
+      # Every pod's log of the period, from Loki, in place of the running pods' kubectl logs. A
+      # port-forward to the namespace's Loki, for the duration of this step only. Prints counts only.
+      - name: Read the logs from Loki
+        shell: bash
+        env:
+          EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+        run: |
+          python3 -E -s "$SCRIPTS/pod_log_loki.py" --context "$EKS_CLUSTER_NAME" --namespace "$NAMESPACE" \
+            --log-dir "$LOG_DIR" --since "$SINCE"
+
       - name: Remove the cluster credentials
         shell: bash
         run: |
@@ -358,4 +377,4 @@ jobs:
       - name: Remove the logs and the MCP configuration
         if: always()
         shell: bash
-        run: rm -rf "$LOG_DIR" "$RUNNER_TEMP/claude" "$HOME/.kube"
+        run: rm -rf "$LOG_DIR" "$LOG_DIR.loki" "$RUNNER_TEMP/claude" "$HOME/.kube"

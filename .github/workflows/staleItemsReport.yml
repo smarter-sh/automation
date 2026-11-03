@@ -10,7 +10,7 @@
 # The logic is in scripts/organization_health.py, whose tests are in scripts/tests.
 #
 # Secrets:
-#   ORG_AUDIT_TOKEN  a GitHub token with repository issues and organization
+#   GH_TOKEN         a GitHub token with repository issues and organization
 #                    metadata read access. Its owner must be able to read every
 #                    organization's repository.
 #   SLACK_BOT_TOKEN  optional: chat:write.public, or the bot must be a member
@@ -59,7 +59,7 @@ jobs:
       - name: Find stale open items
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.ORG_AUDIT_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT }}
         run: |
           python3 -E -s scripts/organization_health.py run stale \
             --months "${MONTHS:-1}" --results "$RUNNER_TEMP/results.json"

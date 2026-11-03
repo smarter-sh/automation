@@ -121,6 +121,22 @@ class TestCommandLine(PodLogReviewTestCase):
         self.assertIn("- Redactions: 3 (email 2, token 1) in 2 file(s), listed in ", text)
         self.assertIn('Each one is a finding: see "Redactions are leaks".', text)
 
+    def test_prompt_names_the_log_source(self):
+        text = prompt(self.settings)
+        self.assertIn("- Log source: kubectl: the running pods' logs, from kubectl logs.", text, "no log-source.txt")
+        inventory = Path(self.settings.log_dir) / "inventory"
+        inventory.mkdir(exist_ok=True)
+        source = inventory / "log-source.txt"
+        source.write_text("loki: every pod's log of the period.\nperiod: ...\n", encoding="utf-8")
+        text = prompt(replace(self.settings, since=""))
+        self.assertIn("- Log source: loki: every pod's log of the period. See inventory/log-source.txt.", text)
+        self.assertIn("- Each log covers: the last 72 hours, all that Loki keeps", text)
+        source.write_text("", encoding="utf-8")
+        self.assertIn("- Log source: kubectl:", prompt(self.settings), "an empty file")
+        source.write_text("kubectl: Loki could not be read: down\n", encoding="utf-8")
+        text = prompt(replace(self.settings, since=""))
+        self.assertIn("- Each log covers: the lifetime of the container", text)
+
     def test_claude_command(self):
         command = claude_command(self.settings, "review")
         self.assertEqual(command[:3], ["claude", "-p", "review"])

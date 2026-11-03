@@ -52,6 +52,13 @@ import sys
 DESCRIPTION = "Redact credentials and personal data from downloaded logs, in place."
 """The command line's description."""
 
+NOT_A_CALL = r"(?!(?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*\()"
+"""A lookahead that fails on a Python call, e.g. ``self.authenticate_credentials(auth[1])``.
+
+Python prints each frame's source line in a traceback, so ``user, auth_token = super().authenticate(token)``
+is source code, not a value: the "token" and "secret" patterns skip it.
+"""
+
 PATTERNS: list[tuple[str, re.Pattern]] = [
     # In this order: a credential is redacted whole before the "token" and "secret" patterns below,
     # which would redact only part of it. The examples are shortened with "…".
@@ -95,22 +102,31 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
     #   mysql://smarter:s3cret@db:3306/ -> mysql://<redacted:password-in-url>@db:3306/
     ("password-in-url", re.compile(r"://(?P<value>[^:/\s@]+:[^@\s/]+)@")),
     #
-    # The value after a word such as Bearer, token or api_key, if it is 16 or more characters:
+    # The value after a word such as Bearer, token or api_key, if it is 16 or more characters and
+    # not a Python call (see NOT_A_CALL):
     #   Authorization: Bearer 9f8e7d6c5b4a3f2e… -> Authorization: Bearer <redacted:token>
     #   "api_key": "AbCdEf0123456789…"           -> "api_key": "<redacted:token>"
     (
         "token",
-        re.compile(r"(?i)\b(?:bearer|token|apikey|api-key|api_key)[\"' :=]{1,3}(?P<value>[A-Za-z0-9._~+/-]{16,}=*)"),
+        re.compile(
+            r"(?i)\b(?:bearer|token|apikey|api-key|api_key)[\"' :=]{1,3}"
+            + NOT_A_CALL
+            + r"(?P<value>[A-Za-z0-9._~+/-]{16,}=*)"
+        ),
     ),
     #
     # The value of a password or secret setting, if it is 6 or more characters:
     #   password=hunter22            -> password=<redacted:secret>
     #   "client_secret": "Zx81…"     -> "client_secret": "<redacted:secret>"
+    # but not a Python call in a traceback's source line (see NOT_A_CALL), nor the name in
+    # Smarter's description of a Secret resource, "Secret: openai_api_key, id: 1": a value is
+    # never followed by ", id: <number>".
     (
         "secret",
         re.compile(
             r"(?i)\b(?:password|passwd|pwd|secret|client_secret|access_token|auth_token)[\"']?[ \t]*[:=][ \t]*[\"']?"
-            r"(?P<value>[^\s\"',;&]{6,})"
+            + NOT_A_CALL
+            + r"(?P<value>[^\s\"',;&]{6,})(?![^\s\"',;&])(?!,[ \t]*id:[ \t]*\d)"
         ),
     ),
     #
@@ -137,6 +153,22 @@ See :func:`redact_ip`.
 """
 KEEP_IPS = {"127.0.0.1", "0.0.0.0", "::1"}  # nosec B104: addresses to keep, not to bind
 """Addresses that say where a server listens, not who connected."""
+
+ALLOY_MARKERS: list[tuple[str, re.Pattern]] = [
+    ("email", re.compile(r"<email>")),
+    ("credential", re.compile(r"<redacted>")),
+]
+"""What Grafana Alloy writes in place of a value it redacted, and the kind that it becomes here.
+
+The platform's Helm chart redacts the logs before Loki stores them (``loki.process "redact"`` in smarter's
+``helm/charts/smarter/values.yaml``), so a log read from Loki (``pod_log_loki.py``) holds Alloy's markers
+instead of the values: ``<email>`` for an email address, ``<redacted>`` for a token, an api key, a JWT, an
+AWS key or a password, and ``<ip>`` for any IPv4 address. The first two become this script's own
+placeholders, ``<redacted:email>`` and ``<redacted:credential>``, and are counted, because a log that held
+one is still a finding: Smarter logged something that it must not. ``<ip>`` is left as it is, and not
+counted: Alloy replaces every IPv4 address, the pods' own private addresses too, so it doesn't say that a
+person's address was logged.
+"""
 
 PLACEHOLDER = re.compile(r"<redacted:(?P<kind>[a-z-]+)>")
 """A placeholder that :func:`redact_match` or :func:`redact_ip` wrote, e.g. ``<redacted:email>``."""
@@ -199,10 +231,18 @@ def redact(text: str, counts: collections.Counter) -> str:
     """
     Return the text with every match of :data:`PATTERNS` and every public IP address replaced.
 
+    Alloy's markers (:data:`ALLOY_MARKERS`) become placeholders first, so that the patterns below leave the
+    values that Alloy already redacted alone.
+
     :param text: The text of a log.
     :param counts: Counts the matches by kind, e.g. ``email``, updated in place.
     :returns: The text, with each match replaced by ``<redacted:<kind>>``.
     """
+    for kind, marker in ALLOY_MARKERS:
+        placeholder = f"<redacted:{kind}>"
+        text, found = marker.subn(placeholder, text)
+        if found:
+            counts[kind] += found
     for kind, pattern in PATTERNS:
         # sub() calls the function with each match, and puts what it returns in the match's place.
         text = pattern.sub(functools.partial(redact_match, kind=kind, counts=counts), text)
