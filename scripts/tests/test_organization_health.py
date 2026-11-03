@@ -78,7 +78,7 @@ class TestSecurityScan(unittest.TestCase):
 
     def api(self, endpoint):
         if endpoint.startswith("orgs/"):
-            return [{"full_name": REPOSITORY, "default_branch": "main"}]
+            return [{"full_name": REPOSITORY, "default_branch": "main", "private": False}]
         if endpoint == f"repos/{REPOSITORY}":
             return {"security_and_analysis": {"secret_scanning": {"status": "enabled"}}}
         if endpoint.endswith("/actions/permissions/workflow"):
@@ -105,7 +105,7 @@ class TestSecurityScan(unittest.TestCase):
         def fake_api(*args):
             endpoint = args[2]
             if endpoint.startswith("orgs/"):
-                return [{"full_name": REPOSITORY, "default_branch": "main"}]
+                return [{"full_name": REPOSITORY, "default_branch": "main", "private": False}]
             if endpoint == f"repos/{REPOSITORY}":
                 return {"security_and_analysis": {"secret_scanning": {"status": "disabled"}}}
             if endpoint.endswith("/actions/permissions/workflow"):
@@ -135,29 +135,27 @@ class TestSecurityScan(unittest.TestCase):
             ["Force pushes are allowed on the default branch.", "The default branch can be deleted."],
         )
 
-    def test_free_plan_limits_on_a_private_repository_are_findings(self):
+    def test_private_repositories_are_skipped(self):
+        private = "smarter-sh/private-example"
+
         def fake_api(*args):
             endpoint = args[2]
-            if endpoint == f"repos/{REPOSITORY}":
-                return {"private": True, "security_and_analysis": None}
-            if endpoint.endswith("/branches/main/protection"):
-                raise subprocess.CalledProcessError(
-                    1,
-                    ["gh"],
-                    stderr="gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)",
-                )
+            if endpoint.startswith("orgs/"):
+                return [
+                    {"full_name": REPOSITORY, "default_branch": "main", "private": False},
+                    {"full_name": private, "default_branch": "main", "private": True},
+                ]
+            if endpoint.startswith(f"repos/{private}"):
+                raise AssertionError(f"private repository was scanned: {endpoint}")
             return self.api(endpoint)
 
         with mock.patch.object(health, "run_json", side_effect=fake_api):
             results = health.scan_security()
+        self.assertEqual(results["repositories_scanned"], 1)
+        self.assertEqual(results["findings"], [])
         self.assertEqual(results["errors"], {})
-        self.assertEqual(
-            [finding["category"] for finding in results["findings"]],
-            ["Secret scanning", "Default branch protection"],
-        )
-        self.assertTrue(all("Free plan" in finding["detail"] for finding in results["findings"]))
 
-    def test_other_branch_protection_403s_are_errors(self):
+    def test_branch_protection_403s_are_errors(self):
         def fake_api(*args):
             endpoint = args[2]
             if endpoint.endswith("/branches/main/protection"):
