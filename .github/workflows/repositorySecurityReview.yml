@@ -10,7 +10,7 @@
 # The logic is in scripts/organization_health.py, whose tests are in scripts/tests.
 #
 # Secrets:
-#   GH_TOKEN         a GitHub token with read access to repository settings and
+#   PAT              a GitHub token with read access to repository settings and
 #                    organization metadata. Its owner must be an organization
 #                    owner with admin access to every repository. A classic
 #                    PAT needs repo and admin:org scopes.

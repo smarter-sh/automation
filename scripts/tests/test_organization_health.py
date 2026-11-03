@@ -118,6 +118,39 @@ class TestSecurityScan(unittest.TestCase):
             results = health.scan_security()
         self.assertEqual(len(results["findings"]), 5)
 
+    def test_free_plan_limits_on_a_private_repository_are_findings(self):
+        def fake_api(*args):
+            endpoint = args[2]
+            if endpoint == f"repos/{REPOSITORY}":
+                return {"private": True, "security_and_analysis": None}
+            if endpoint.endswith("/branches/main/protection"):
+                raise subprocess.CalledProcessError(
+                    1,
+                    ["gh"],
+                    stderr="gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)",
+                )
+            return self.api(endpoint)
+
+        with mock.patch.object(health, "run_json", side_effect=fake_api):
+            results = health.scan_security()
+        self.assertEqual(results["errors"], {})
+        self.assertEqual(
+            [finding["category"] for finding in results["findings"]],
+            ["Secret scanning", "Default branch protection"],
+        )
+        self.assertTrue(all("Free plan" in finding["detail"] for finding in results["findings"]))
+
+    def test_other_branch_protection_403s_are_errors(self):
+        def fake_api(*args):
+            endpoint = args[2]
+            if endpoint.endswith("/branches/main/protection"):
+                raise api_error(403)
+            return self.api(endpoint)
+
+        with mock.patch.object(health, "run_json", side_effect=fake_api):
+            results = health.scan_security()
+        self.assertEqual(results["errors"], {"Branch protection (403)": 1})
+
 
 class TestWorkflowScan(unittest.TestCase):
     """Workflow source discovery is paginated and decoded from GitHub responses."""
@@ -303,7 +336,20 @@ class TestReports(unittest.TestCase):
         scan.assert_not_called()
         report.assert_called_once()
 
-    def test_scan_command_writes_results_and_fails_for_findings(self):
+    def test_scan_command_passes_with_findings_and_fails_for_errors(self):
+        for errors, expected in (({}, 0), ({"Branch protection (500)": 1}, 1)):
+            results = {"kind": "security", "repositories_scanned": 1, "findings": [{"repository": REPOSITORY}]}
+            results["errors"] = errors
+            with tempfile.TemporaryDirectory() as directory:
+                with (
+                    mock.patch.dict(health.os.environ, {"GH_TOKEN": "test-token"}),
+                    mock.patch.object(health, "scan_security", return_value=results),
+                    mock.patch("sys.stderr", new_callable=io.StringIO),
+                ):
+                    status = health.main(["run", "security", "--results", str(Path(directory) / "results.json")])
+            self.assertEqual(status, expected, errors)
+
+    def test_scan_command_writes_results(self):
         results = {
             "kind": "security",
             "repositories_scanned": 1,
@@ -317,9 +363,8 @@ class TestReports(unittest.TestCase):
                 mock.patch.object(health, "scan_security", return_value=results),
                 mock.patch("sys.stderr", new_callable=io.StringIO),
             ):
-                status = health.main(["run", "security", "--results", str(results_path)])
+                health.main(["run", "security", "--results", str(results_path)])
             self.assertEqual(json.loads(results_path.read_text(encoding="utf-8")), results)
-        self.assertEqual(status, 1)
 
     def test_scan_command_reports_an_empty_token_without_scanning(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -336,9 +381,9 @@ class TestReports(unittest.TestCase):
         self.assertEqual(results["kind"], "security")
         self.assertEqual(
             list(results["errors"]),
-            ["GH_TOKEN is empty: is the GH_TOKEN organization secret available to this repository?"],
+            ["GH_TOKEN is empty: is the PAT secret set?"],
         )
-        self.assertIn("organization secret", stderr.getvalue())
+        self.assertIn("PAT secret", stderr.getvalue())
 
     def test_empty_token_results_still_make_a_stale_report(self):
         with tempfile.TemporaryDirectory() as directory:

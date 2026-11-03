@@ -136,6 +136,9 @@ def status_code(error: subprocess.CalledProcessError) -> str:
     return match.group(1) if match else "unknown"
 
 
+PAID_PLAN_ONLY = "GitHub's Free plan doesn't offer this for private repositories."
+
+
 def new_results(kind: str) -> dict:
     """Create the common results document.
 
@@ -204,10 +207,12 @@ def scan_security() -> dict:
         try:
             details = github_json(base) or {}
             security = details.get("security_and_analysis")
-            if not isinstance(security, dict):
+            if security is None and details.get("private"):
+                # GitHub's Free plan offers no secret scanning for private repositories.
+                add_finding(results, repository, "Secret scanning", f"Not available: {PAID_PLAN_ONLY}", web_url)
+            elif not isinstance(security, dict):
                 raise ValueError("security settings are unavailable")
-            secret_scanning = security.get("secret_scanning") or {}
-            if secret_scanning.get("status") != "enabled":
+            elif (security.get("secret_scanning") or {}).get("status") != "enabled":
                 add_finding(results, repository, "Secret scanning", "Secret scanning is not enabled.", web_url)
         except (subprocess.CalledProcessError, ValueError) as error:
             record_error(results, "Repository security metadata", error)
@@ -258,6 +263,14 @@ def scan_security() -> dict:
                     repository,
                     "Default branch protection",
                     f"The {default_branch} branch has no protection rules.",
+                    f"{web_url}/settings/branches",
+                )
+            elif status_code(error) == "403" and "Upgrade to GitHub Pro" in error_line(error):
+                add_finding(
+                    results,
+                    repository,
+                    "Default branch protection",
+                    f"The {default_branch} branch can't be protected: {PAID_PLAN_ONLY}",
                     f"{web_url}/settings/branches",
                 )
             else:
@@ -858,7 +871,7 @@ def main(argv: list[str] | None = None) -> int:
     """Run one report, writing its data to a temporary file.
 
     :param argv: Optional command-line arguments, excluding the program name.
-    :returns: 0 on a successful report; 1 if the scan found findings or errors.
+    :returns: 0 on a complete scan, findings or not; 1 if any GitHub API request failed.
     :raises OSError: If the results or report files cannot be read or written.
     :raises ValueError: If the requested scan parameters or saved JSON are invalid.
     """
@@ -885,7 +898,7 @@ def main(argv: list[str] | None = None) -> int:
     if not os.environ.get("GH_TOKEN"):
         # Without a token every API call fails; say so once instead of counting failures.
         results = new_results(args.kind)
-        results["errors"]["GH_TOKEN is empty: is the GH_TOKEN organization secret available to this repository?"] = 1
+        results["errors"]["GH_TOKEN is empty: is the PAT secret set?"] = 1
         if args.kind == "stale":
             results.update(months=args.months, cutoff="n/a")
     elif args.kind == "stale":
@@ -905,7 +918,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     for error, count in sorted(results["errors"].items()):
         print(f"error: {error}: {count}", file=sys.stderr)
-    return 1 if results["findings"] or results["errors"] else 0
+    # Findings are the report's content and go to Slack; only an incomplete scan fails the run.
+    return 1 if results["errors"] else 0
 
 
 if __name__ == "__main__":
