@@ -282,24 +282,9 @@ def scan_security() -> dict:
         if not protection:
             add_finding(results, repository, "Default branch protection", "Protection rules are missing.", web_url)
             continue
-        reviews = protection.get("required_pull_request_reviews")
-        if not reviews:
-            add_finding(
-                results,
-                repository,
-                "Default branch protection",
-                "Pull requests are not required for the default branch.",
-                f"{web_url}/settings/branches",
-            )
-        enforce_admins = protection.get("enforce_admins") or {}
-        if not enforce_admins.get("enabled", False):
-            add_finding(
-                results,
-                repository,
-                "Default branch protection",
-                "Branch protection rules do not apply to administrators.",
-                f"{web_url}/settings/branches",
-            )
+        # Required pull requests and rules that bind administrators are not checked on purpose:
+        # semantic-release commits each release straight to the default branch with the PAT, as an
+        # administrator, and a single maintainer can't approve their own pull requests.
         force_pushes = protection.get("allow_force_pushes") or {}
         if force_pushes.get("enabled", False):
             add_finding(
@@ -307,6 +292,15 @@ def scan_security() -> dict:
                 repository,
                 "Default branch protection",
                 "Force pushes are allowed on the default branch.",
+                f"{web_url}/settings/branches",
+            )
+        deletions = protection.get("allow_deletions") or {}
+        if deletions.get("enabled", False):
+            add_finding(
+                results,
+                repository,
+                "Default branch protection",
+                "The default branch can be deleted.",
                 f"{web_url}/settings/branches",
             )
     return results
