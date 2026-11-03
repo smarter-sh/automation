@@ -10,7 +10,7 @@
 # The logic is in scripts/organization_health.py, whose tests are in scripts/tests.
 #
 # Secrets:
-#   GH_TOKEN         a GitHub token with repository issues and organization
+#   PAT              a GitHub token with repository issues and organization
 #                    metadata read access. Its owner must be able to read every
 #                    organization's repository.
 #   SLACK_BOT_TOKEN  optional: chat:write.public, or the bot must be a member
