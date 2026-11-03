@@ -86,10 +86,12 @@ class TestSecurityScan(unittest.TestCase):
         if endpoint.endswith("/vulnerability-alerts") or endpoint.endswith("/automated-security-fixes"):
             return None
         if endpoint.endswith("/branches/main/protection"):
+            # What the repositories use: no required pull requests, administrators exempt.
             return {
-                "required_pull_request_reviews": {"required_approving_review_count": 1},
-                "enforce_admins": {"enabled": True},
+                "required_pull_request_reviews": None,
+                "enforce_admins": {"enabled": False},
                 "allow_force_pushes": {"enabled": False},
+                "allow_deletions": {"enabled": False},
             }
         raise AssertionError(endpoint)
 
@@ -117,6 +119,21 @@ class TestSecurityScan(unittest.TestCase):
         with mock.patch.object(health, "run_json", side_effect=fake_api):
             results = health.scan_security()
         self.assertEqual(len(results["findings"]), 5)
+
+    def test_force_pushes_and_deletion_are_reported(self):
+        def fake_api(*args):
+            endpoint = args[2]
+            if endpoint.endswith("/branches/main/protection"):
+                return {"allow_force_pushes": {"enabled": True}, "allow_deletions": {"enabled": True}}
+            return self.api(endpoint)
+
+        with mock.patch.object(health, "run_json", side_effect=fake_api):
+            results = health.scan_security()
+        details = [finding["detail"] for finding in results["findings"]]
+        self.assertEqual(
+            details,
+            ["Force pushes are allowed on the default branch.", "The default branch can be deleted."],
+        )
 
     def test_free_plan_limits_on_a_private_repository_are_findings(self):
         def fake_api(*args):
