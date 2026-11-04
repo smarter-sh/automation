@@ -98,7 +98,7 @@ what is a hypothesis: never present a guess as a fact.
 
 ### Redactions are leaks
 
-Smarter's logs must never hold a credential or personal data. The redactor, `scripts/pod_log_redact.py`
+Smarter's logs must never hold a credential or personal data. The redactor, `scripts/pod_log/redact.py`
 in smarter-sh/automation (not in your working directory), replaced what looked like one with a placeholder, e.g. `<redacted:email>`, before you started,
 but that is a safety net, not the fix.
 
@@ -127,7 +127,7 @@ For each kind of placeholder, grouped by the log statement that wrote it:
     or infrastructure identifiers, unless the evidence says worse.
   - **a false positive of the redactor**: the pattern matched something harmless, e.g. a hash or
     an id after the word `token`. The fix is a narrower pattern in smarter-sh/automation's
-    `scripts/pod_log_redact.py`, with a test in its `scripts/tests/test_pod_log_redact.py`. The MCP
+    `scripts/pod_log/redact.py`, with a test in its `scripts/tests/test_pod_log_redact.py`. The MCP
     server cannot write to that repository: open the issue in `smarter`, say in it that the fix
     belongs in smarter-sh/automation, and propose no pull request. Labels `logging`, severity `low`.
 - Open or update its issue as in step 5, with the fingerprint

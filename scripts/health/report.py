@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Write an organization health scan's public summary (counts only) and its Slack message (the details).
 
-Part of :mod:`organization_health`, which runs it; see that module for the scans and how
+Part of :mod:`health.organization_health`, which runs it; see that module for the scans and how
 they are run. It uses only Python's standard library.
 """
 
 from pathlib import Path
 
-from health_common import DISPLAY_NAMES
+from health.common import DISPLAY_NAMES
 from scan_helpers import slack_escape
 
 SLACK_FINDINGS_LIMIT = 100

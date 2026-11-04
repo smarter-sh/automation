@@ -3,16 +3,16 @@
 
 This is the core of ``.github/workflows/podLogReview.yml``. The steps before it download and
 redact the pods' logs, remove the cluster credentials, and configure the Smarter Project MCP
-server; the step after it posts to Slack with ``pod_log_review_slack.py``.
+server; the step after it posts to Slack with ``pod_log/review_slack.py``.
 
 Usage::
 
-    python3 -E -s scripts/pod_log_review.py run
-    python3 -E -s scripts/pod_log_review.py summarize
+    python3 -E -s scripts/pod_log/review.py run
+    python3 -E -s scripts/pod_log/review.py summarize
 
 Both commands take their settings from the workflow's environment (see :class:`Settings`), and
 share one file, ``$RUNNER_TEMP/claude/stream.jsonl``: Claude Code's ``stream-json`` output, which
-``run`` writes and ``summarize`` and ``pod_log_review_slack.py`` read.
+``run`` writes and ``summarize`` and ``pod_log/review_slack.py`` read.
 
 ``run`` does this, in order:
 
@@ -63,9 +63,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pod_log_loki import SOURCE_NAME as LOKI_SOURCE_NAME
-from pod_log_redact import REPORT_NAME, read_report
-from pod_log_review_stream import (
+# Run by its path, a script has only its own folder (scripts/pod_log) on sys.path. Add scripts/, so
+# that the imports below find the pod_log package.
+SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent)
+if SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, SCRIPTS_DIR)
+
+from pod_log.loki import SOURCE_NAME as LOKI_SOURCE_NAME  # noqa: E402
+from pod_log.redact import REPORT_NAME, read_report  # noqa: E402
+from pod_log.review_stream import (  # noqa: E402
     PodInventory,
     ReviewResult,
     final_result,
@@ -102,7 +108,7 @@ GitHub refuses a step summary over 1 MiB.
 MAX_ERROR_CHARS = 500
 """The most of an API error's message printed in the workflow's log."""
 
-PROMPTS_DIR = str(Path(__file__).resolve().parent.parent / ".github" / "prompts")
+PROMPTS_DIR = str(Path(__file__).resolve().parents[2] / ".github" / "prompts")
 """This repository's prompts folder, as an absolute path.
 
 Claude Code runs in the smarter checkout, so every path to a file of this repository is absolute.
@@ -246,7 +252,7 @@ def claude_environment() -> dict[str, str]:
 
 def log_source(log_dir: str) -> str:
     """
-    Say where the logs came from, from the first line that ``pod_log_loki.py`` wrote in ``inventory/``.
+    Say where the logs came from, from the first line that ``pod_log/loki.py`` wrote in ``inventory/``.
 
     :param log_dir: The log folder.
     :returns: The line, e.g. ``loki: every pod's log of the period, ...`` or ``kubectl: the running pods'
@@ -305,7 +311,7 @@ def log_span(since: str, source: str) -> str:
 
 def describe_redactions(log_dir: str) -> str:
     """
-    Describe what ``pod_log_redact.py`` redacted from the logs, for the prompt.
+    Describe what ``pod_log/redact.py`` redacted from the logs, for the prompt.
 
     :param log_dir: The log folder, which holds the redaction report.
     :returns: The count, by kind and in how many files, and where the report is, or ``none``.

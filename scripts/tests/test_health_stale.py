@@ -1,4 +1,4 @@
-"""Tests of scripts/health_stale.py, the ``stale`` scan.
+"""Tests of scripts/health/stale.py, the ``stale`` scan.
 
 No test reaches GitHub.
 """
@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 import github_cli
-import health_stale as stale
+from health import stale as stale
 from tests.health_fixtures import NOW, REPOSITORY
 
 

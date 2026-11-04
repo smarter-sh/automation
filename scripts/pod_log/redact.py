@@ -3,7 +3,7 @@
 
 Usage::
 
-    python3 -E -s scripts/pod_log_redact.py <folder>
+    python3 -E -s scripts/pod_log/redact.py <folder>
 
 Every ``*.log`` and ``*.txt`` file under the folder is rewritten, with each match replaced by a
 placeholder that names what it was, e.g. ``<redacted:email>``, so that a reviewer still sees
@@ -161,7 +161,7 @@ ALLOY_MARKERS: list[tuple[str, re.Pattern]] = [
 """What Grafana Alloy writes in place of a value it redacted, and the kind that it becomes here.
 
 The platform's Helm chart redacts the logs before Loki stores them (``loki.process "redact"`` in smarter's
-``helm/charts/smarter/values.yaml``), so a log read from Loki (``pod_log_loki.py``) holds Alloy's markers
+``helm/charts/smarter/values.yaml``), so a log read from Loki (``pod_log/loki.py``) holds Alloy's markers
 instead of the values: ``<email>`` for an email address, ``<redacted>`` for a token, an api key, a JWT, an
 AWS key or a password, and ``<ip>`` for any IPv4 address. The first two become this script's own
 placeholders, ``<redacted:email>`` and ``<redacted:credential>``, and are counted, because a log that held
@@ -378,7 +378,7 @@ def main() -> int:
     args = parser.parse_args()
     folder = pathlib.Path(args.folder)
     if not folder.is_dir():
-        print(f"pod_log_redact.py: {folder} is not a folder", file=sys.stderr)
+        print(f"pod_log/redact.py: {folder} is not a folder", file=sys.stderr)
         return 1
     # the placeholders of every file, by kind, e.g. {"email": 3}.
     total: collections.Counter = collections.Counter()

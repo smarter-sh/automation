@@ -1,4 +1,4 @@
-"""Tests of scripts/organization_health.py, the command line of the organization health reports, and of its report.
+"""Tests of scripts/health/organization_health.py, the organization health reports' command line, and of its report.
 
 No test reaches GitHub: the scans are replaced by fakes.
 """
@@ -10,8 +10,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import health_report
-import organization_health as health
+from health import organization_health
+from health import report as health_report
 from tests.health_fixtures import REPOSITORY
 
 
@@ -56,10 +56,10 @@ class TestReports(unittest.TestCase):
             results_path = Path(directory) / "results.json"
             results_path.write_text(json.dumps(results), encoding="utf-8")
             with (
-                mock.patch.object(health, "scan_security") as scan,
-                mock.patch.object(health, "write_report") as report,
+                mock.patch.object(organization_health, "scan_security") as scan,
+                mock.patch.object(organization_health, "write_report") as report,
             ):
-                status = health.main(
+                status = organization_health.main(
                     [
                         "report",
                         "--results",
@@ -90,11 +90,13 @@ class TestReports(unittest.TestCase):
             }
             with tempfile.TemporaryDirectory() as directory:
                 with (
-                    mock.patch.dict(health.os.environ, {"GH_TOKEN": "test-token"}),
-                    mock.patch.object(health, "scan_security", return_value=results),
+                    mock.patch.dict(organization_health.os.environ, {"GH_TOKEN": "test-token"}),
+                    mock.patch.object(organization_health, "scan_security", return_value=results),
                     mock.patch("sys.stderr", new_callable=io.StringIO),
                 ):
-                    status = health.main(["run", "security", "--results", str(Path(directory) / "results.json")])
+                    status = organization_health.main(
+                        ["run", "security", "--results", str(Path(directory) / "results.json")]
+                    )
             self.assertEqual(status, expected, errors)
 
     def test_scan_command_writes_results(self):
@@ -107,11 +109,11 @@ class TestReports(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             results_path = Path(directory) / "results.json"
             with (
-                mock.patch.dict(health.os.environ, {"GH_TOKEN": "test-token"}),
-                mock.patch.object(health, "scan_security", return_value=results),
+                mock.patch.dict(organization_health.os.environ, {"GH_TOKEN": "test-token"}),
+                mock.patch.object(organization_health, "scan_security", return_value=results),
                 mock.patch("sys.stderr", new_callable=io.StringIO),
             ):
-                health.main(["run", "security", "--results", str(results_path)])
+                organization_health.main(["run", "security", "--results", str(results_path)])
             saved = results_path.read_text(encoding="utf-8")
         self.assertEqual(json.loads(saved), results)
 
@@ -119,11 +121,11 @@ class TestReports(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             results_path = Path(directory) / "results.json"
             with (
-                mock.patch.dict(health.os.environ, {"GH_TOKEN": ""}),
-                mock.patch.object(health, "scan_security") as scan,
+                mock.patch.dict(organization_health.os.environ, {"GH_TOKEN": ""}),
+                mock.patch.object(organization_health, "scan_security") as scan,
                 mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
             ):
-                status = health.main(["run", "security", "--results", str(results_path)])
+                status = organization_health.main(["run", "security", "--results", str(results_path)])
             saved = results_path.read_text(encoding="utf-8")
         results = json.loads(saved)
         self.assertEqual(status, 1)
@@ -136,10 +138,10 @@ class TestReports(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             results_path = Path(directory) / "results.json"
             with (
-                mock.patch.dict(health.os.environ, {"GH_TOKEN": ""}),
+                mock.patch.dict(organization_health.os.environ, {"GH_TOKEN": ""}),
                 mock.patch("sys.stderr", new_callable=io.StringIO),
             ):
-                health.main(["run", "stale", "--results", str(results_path)])
+                organization_health.main(["run", "stale", "--results", str(results_path)])
             saved = results_path.read_text(encoding="utf-8")
         results = json.loads(saved)
         message = health_report.slack_message(results, "https://example.test/run")

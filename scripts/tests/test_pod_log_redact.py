@@ -1,4 +1,4 @@
-"""Test scripts/pod_log_redact.py, which redacts credentials and personal data from downloaded logs."""
+"""Test scripts/pod_log/redact.py, which redacts credentials and personal data from downloaded logs."""
 
 import collections
 import io
@@ -10,7 +10,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from pod_log_redact import REPORT_NAME, locate, main, read_report, redact
+from pod_log.redact import REPORT_NAME, locate, main, read_report, redact
 
 
 class TestPodLogRedact(unittest.TestCase):
@@ -90,7 +90,7 @@ class TestPodLogRedact(unittest.TestCase):
             log.parent.mkdir()
             log.write_text("mail someone@example.com\n", encoding="utf-8")
             output = io.StringIO()
-            with mock.patch.object(sys, "argv", ["pod_log_redact.py", folder]), redirect_stdout(output):
+            with mock.patch.object(sys, "argv", ["pod_log/redact.py", folder]), redirect_stdout(output):
                 self.assertEqual(main(), 0)
             self.assertEqual(log.read_text(encoding="utf-8"), "mail <redacted:email>\n")
             printed = output.getvalue().strip()
@@ -111,7 +111,7 @@ class TestPodLogRedact(unittest.TestCase):
             report_json = json.dumps(report)
             self.assertNotIn("someone", report_json, "the report never holds a value")
             # a second run reports the placeholders that are already there, the same way.
-            with mock.patch.object(sys, "argv", ["pod_log_redact.py", folder]), redirect_stdout(io.StringIO()):
+            with mock.patch.object(sys, "argv", ["pod_log/redact.py", folder]), redirect_stdout(io.StringIO()):
                 self.assertEqual(main(), 0)
             self.assertEqual(read_report(folder), report)
 
@@ -119,7 +119,7 @@ class TestPodLogRedact(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             (Path(folder) / "pod.log").write_text("all is well\n", encoding="utf-8")
             output = io.StringIO()
-            with mock.patch.object(sys, "argv", ["pod_log_redact.py", folder]), redirect_stdout(output):
+            with mock.patch.object(sys, "argv", ["pod_log/redact.py", folder]), redirect_stdout(output):
                 self.assertEqual(main(), 0)
             self.assertEqual(output.getvalue().strip(), "redacted 1 file(s): nothing")
             self.assertEqual(read_report(folder), {"total": 0, "kinds": {}, "files": {}})
@@ -144,7 +144,7 @@ class TestPodLogRedact(unittest.TestCase):
 
     def test_main_needs_a_folder(self):
         with (
-            mock.patch.object(sys, "argv", ["pod_log_redact.py", "/no/such/folder"]),
+            mock.patch.object(sys, "argv", ["pod_log/redact.py", "/no/such/folder"]),
             redirect_stderr(io.StringIO()),
         ):
             self.assertEqual(main(), 1)

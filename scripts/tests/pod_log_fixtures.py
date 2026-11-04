@@ -4,7 +4,7 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
-from pod_log_review_stream import JsonObject
+from pod_log.review_stream import JsonObject
 
 HEALTHY_ANSWER = "## Health\n\nAll good.\n\n**Verdict: healthy**\n"
 """A final answer that ends with the healthy verdict, in bold, as Claude may write it."""

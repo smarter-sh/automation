@@ -7,9 +7,9 @@ initialization, each assistant turn and its tool calls, each tool result, and fi
 reads that stream, and the log folder that ``download-logs.sh`` wrote, for the workflow's two
 scripts:
 
-- ``pod_log_review.py`` decides from :func:`final_result` and :func:`write_attempts` whether a failed
+- ``pod_log/review.py`` decides from :func:`final_result` and :func:`write_attempts` whether a failed
   run may be retried, and writes the final answer to the run's page;
-- ``pod_log_review_slack.py`` lists the GitHub writes that succeeded, or, on a clean run, posts the facts of
+- ``pod_log/review_slack.py`` lists the GitHub writes that succeeded, or, on a clean run, posts the facts of
   :class:`PodInventory`.
 
 Every reader tolerates a damaged stream: a line that isn't a JSON object, such as the last line of
@@ -18,8 +18,8 @@ which anyone can write into, so nothing here prints any of it.
 
 Like every script in ``scripts/``, it uses only the standard library, because the runner has no
 virtual environment. The workflow runs the scripts with ``python3 -E -s``, which ignores
-``PYTHONPATH`` and the user's site-packages but, unlike ``-I``, keeps the script's own folder on
-``sys.path``, so that they import this module by name.
+``PYTHONPATH`` and the user's site-packages. The scripts that import this module put ``scripts/``
+on ``sys.path`` themselves, so that they import it as ``pod_log.review_stream``.
 
 It uses only Python's standard library, which comes with every Python install:
 
@@ -40,7 +40,7 @@ import os
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import TypeVar
+from typing import TypeVar, cast
 
 T = TypeVar("T")
 
@@ -74,7 +74,8 @@ def typed(value: object, kind: type[T] | tuple[type[T], ...]) -> T | None:
         return None
     if isinstance(value, bool) and kind is not bool:
         return None
-    return value
+    # The checks above prove the type, but mypy can't narrow isinstance() with a tuple of type[T].
+    return cast(T, value)
 
 
 @dataclass(frozen=True)

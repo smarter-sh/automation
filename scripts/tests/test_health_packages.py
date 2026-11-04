@@ -1,4 +1,4 @@
-"""Tests of scripts/health_packages.py, the ``packages`` scan.
+"""Tests of scripts/health/packages.py, the ``packages`` scan.
 
 No test reaches GitHub, a registry or a package manager.
 """
@@ -7,7 +7,7 @@ import json
 import unittest
 from unittest import mock
 
-import health_packages
+from health import packages as health_packages
 from tests.health_fixtures import REPOSITORY
 
 

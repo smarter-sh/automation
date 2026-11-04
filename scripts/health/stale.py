@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The ``stale`` scan: open pull requests and issues older than a number of calendar months.
 
-Part of :mod:`organization_health`, which runs it; see that module for the scans and how
+Part of :mod:`health.organization_health`, which runs it; see that module for the scans and how
 they are run. It uses only Python's standard library and ``gh``.
 """
 
@@ -9,7 +9,7 @@ import subprocess  # nosec B404: only for CalledProcessError
 from datetime import datetime, timezone
 
 from github_cli import api_pages
-from health_common import (
+from health.common import (
     add_finding,
     finding_sort_key,
     is_organization_repository,

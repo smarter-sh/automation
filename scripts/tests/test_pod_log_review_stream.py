@@ -1,10 +1,10 @@
-"""Test scripts/pod_log_review_stream.py, which reads a Claude Code run's stream and its log folder."""
+"""Test scripts/pod_log/review_stream.py, which reads a Claude Code run's stream and its log folder."""
 
 import tempfile
 import unittest
 from pathlib import Path
 
-from pod_log_review_stream import (
+from pod_log.review_stream import (
     PodInventory,
     ReviewResult,
     content_blocks,

@@ -18,20 +18,19 @@
 # environment.
 #
 # Logs. smarter's download-logs.sh writes the inventory (pods, events, images)
-# and the running pods' logs with kubectl. pod_log_loki.py then replaces those
+# and the running pods' logs with kubectl. pod_log/loki.py then replaces those
 # logs with the whole period's, from Loki, through a kubectl port-forward to the
 # namespace's smarter-loki Service: no new secret, and no new host. If Loki
 # cannot be read, the kubectl logs stay, the run's log gets a warning, and the
 # review is told why, in inventory/log-source.txt.
 #
-# Code. The workflow's Python scripts are in scripts/, the repository's home
-# for code that workflows run: pod_log_loki.py, pod_log_redact.py, pod_log_review.py,
-# pod_log_review_stream.py and pod_log_review_slack.py, which posts through
-# slack_post.py like every workflow's Slack step. Their tests are in
-# scripts/tests. They use only the
-# standard library, because the runner has no virtual environment, and run
-# with "python3 -E -s": no PYTHONPATH, no user site-packages, but the
-# script's own folder on sys.path, so that they import each other by name.
+# Code. The workflow's Python scripts are in scripts/pod_log/: loki.py,
+# redact.py, review.py, review_stream.py and review_slack.py, which posts
+# through scripts/slack_post.py like every workflow's Slack step. Their tests
+# are in scripts/tests. They use only the standard library, because the runner
+# has no virtual environment, and run with "python3 -E -s": no PYTHONPATH, no
+# user site-packages. The ones that import another script add scripts/ to
+# sys.path first, and import it as pod_log.<module> or by name.
 # The shell scripts that download the logs are smarter's smarter-pod-log-review
 # and smarter-kubectl skills' own, which also use them for reviews by hand, and
 # run from the smarter checkout.
@@ -264,7 +263,7 @@ jobs:
         env:
           EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
         run: |
-          python3 -E -s "$SCRIPTS/pod_log_loki.py" --context "$EKS_CLUSTER_NAME" --namespace "$NAMESPACE" \
+          python3 -E -s "$SCRIPTS/pod_log/loki.py" --context "$EKS_CLUSTER_NAME" --namespace "$NAMESPACE" \
             --log-dir "$LOG_DIR" --since "$SINCE"
 
       - name: Remove the cluster credentials
@@ -279,7 +278,7 @@ jobs:
 
       - name: Redact credentials and personal data
         shell: bash
-        run: python3 -E -s "$SCRIPTS/pod_log_redact.py" "$LOG_DIR"
+        run: python3 -E -s "$SCRIPTS/pod_log/redact.py" "$LOG_DIR"
 
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -328,7 +327,7 @@ jobs:
       # that design, and keeps the stream-json output that the Slack step reads.
       #
       # The run's parameters, the credentials Claude may not hold, and when a failed
-      # run is retried are in scripts/pod_log_review.py, which starts Claude in
+      # run is retried are in scripts/pod_log/review.py, which starts Claude in
       # $SMARTER_DIR; the permissions are in .github/prompts/pod-log-review.settings.json.
       - name: Review the logs with Claude Code
         id: claude
@@ -341,14 +340,14 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # no telemetry, error reporting or update checks: the runner allows only the hosts above.
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
-        run: python3 -E -s "$SCRIPTS/pod_log_review.py" run
+        run: python3 -E -s "$SCRIPTS/pod_log/review.py" run
 
       # Only Claude's final summary, which follows the same public-writing rules as the issues.
       # The stream, which holds every tool call and result, is never printed.
       - name: Summarize
         if: always()
         shell: bash
-        run: python3 -E -s "$SCRIPTS/pod_log_review.py" summarize
+        run: python3 -E -s "$SCRIPTS/pod_log/review.py" summarize
 
       # One message per run, listing each issue opened, commented on or closed, and
       # each pull request, taken from the MCP server's results rather than from what
@@ -367,7 +366,7 @@ jobs:
             echo "Claude Code wrote no output, so there is nothing to tell Slack."
             exit 0
           fi
-          python3 -E -s "$SCRIPTS/pod_log_review_slack.py" "$RUNNER_TEMP/claude/stream.jsonl" \
+          python3 -E -s "$SCRIPTS/pod_log/review_slack.py" "$RUNNER_TEMP/claude/stream.jsonl" \
             --channel "$SLACK_CHANNEL" \
             --title "Pod log review of ${PLATFORM_DOMAIN}" \
             --run-url "$RUN_URL" \

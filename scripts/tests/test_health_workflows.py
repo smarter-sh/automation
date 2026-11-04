@@ -1,4 +1,4 @@
-"""Tests of scripts/health_workflows.py, the ``workflow`` scan.
+"""Tests of scripts/health/workflows.py, the ``workflow`` scan.
 
 No test reaches GitHub.
 """
@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 import github_cli
-import health_workflows as workflows
+from health import workflows as workflows
 from tests.health_fixtures import REPOSITORY
 
 

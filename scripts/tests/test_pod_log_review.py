@@ -1,4 +1,4 @@
-"""Test scripts/pod_log_review.py, which runs the pod log review with Claude Code, and summarizes it."""
+"""Test scripts/pod_log/review.py, which runs the pod log review with Claude Code, and summarizes it."""
 
 import io
 import json
@@ -10,8 +10,8 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-import pod_log_review
-from pod_log_review import (
+from pod_log import review as pod_log_review
+from pod_log.review import (
     SCRUBBED_ENV,
     Settings,
     claude_command,
@@ -21,7 +21,7 @@ from pod_log_review import (
     summarize,
     worth_retrying,
 )
-from pod_log_review_stream import ReviewResult
+from pod_log.review_stream import ReviewResult
 from tests.pod_log_fixtures import (
     result_event,
     write_call,

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The ``security`` scan: token defaults, branch protection, secret scanning and Dependabot settings.
 
-Part of :mod:`organization_health`, which runs it; see that module for the scans and how
+Part of :mod:`health.organization_health`, which runs it; see that module for the scans and how
 they are run. It uses only Python's standard library and ``gh``.
 """
 
@@ -9,7 +9,7 @@ import subprocess  # nosec B404: only for CalledProcessError
 from urllib.parse import quote
 
 from github_cli import api_object, http_status
-from health_common import (
+from health.common import (
     add_finding,
     is_branch_name,
     is_organization_repository,

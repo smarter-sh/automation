@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What every organization health scan shares: its results, the repository list, and reading files.
 
-Part of :mod:`organization_health`, which runs it; see that module for the scans and how
+Part of :mod:`health.organization_health`, which runs it; see that module for the scans and how
 they are run. It uses only Python's standard library and ``gh``.
 """
 

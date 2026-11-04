@@ -1,4 +1,4 @@
-"""Test scripts/pod_log_loki.py, which replaces the downloaded pod logs with the environment's logs from Loki.
+"""Test scripts/pod_log/loki.py, which replaces the downloaded pod logs with the environment's logs from Loki.
 
 Loki is a fake: a small http server, in a thread, on a local port, that answers ``/ready``,
 ``/loki/api/v1/series`` and ``/loki/api/v1/query_range`` from lines held in memory, as Loki does. The
@@ -18,8 +18,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
-import pod_log_loki
-from pod_log_loki import (
+from pod_log import loki as pod_log_loki
+from pod_log.loki import (
     RETENTION,
     SOURCE_NAME,
     Loki,
@@ -327,7 +327,7 @@ class TestRun(FakeLokiTestCase):
 
     def test_main(self):
         self.fake.add("smarter", "app-a", "smarter", [(now_ns() - 1000, "from loki")])
-        argv = ["pod_log_loki.py", "--context", "ctx", "--namespace", NAMESPACE, "--log-dir", str(self.log_dir)]
+        argv = ["pod_log/loki.py", "--context", "ctx", "--namespace", NAMESPACE, "--log-dir", str(self.log_dir)]
         with mock.patch("sys.argv", argv), redirect_stdout(io.StringIO()):
             self.assertEqual(main(), 0)
         self.assertTrue(self.source().startswith("loki:"))

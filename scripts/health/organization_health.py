@@ -20,14 +20,14 @@ contains counts only; detailed repository and item information is written only t
 
 Run a scan from the repository root::
 
-    python3 -E -s scripts/organization_health.py run security --results results.json
-    python3 -E -s scripts/organization_health.py run stale --months 1 --results results.json
-    python3 -E -s scripts/organization_health.py report --results results.json \\
+    python3 -E -s scripts/health/organization_health.py run security --results results.json
+    python3 -E -s scripts/health/organization_health.py run stale --months 1 --results results.json
+    python3 -E -s scripts/health/organization_health.py report --results results.json \\
         --run-url URL --summary summary.md --slack-output slack.txt
 
-This module is the command line. Each scan is in its own module: ``health_security``,
-``health_workflows``, ``health_packages`` and ``health_stale``. ``health_report`` writes the
-summary and the Slack message, and ``health_common`` holds what they share.
+This module is the command line. Each scan is in its own module: ``health.security``,
+``health.workflows``, ``health.packages`` and ``health.stale``. ``health.report`` writes the
+summary and the Slack message, and ``health.common`` holds what they share.
 
 The script uses the Python standard library and ``gh`` (authenticated through ``GH_TOKEN``).
 Tests replace all GitHub, registry, and package-manager calls.
@@ -39,12 +39,18 @@ import os
 import sys
 from pathlib import Path
 
-from health_common import new_results
-from health_packages import scan_packages
-from health_report import write_report
-from health_security import scan_security
-from health_stale import scan_stale
-from health_workflows import scan_workflows
+# Run by its path, a script has only its own folder (scripts/health) on sys.path. Add scripts/, so
+# that the imports below find the health package and the modules the scripts share.
+SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent)
+if SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, SCRIPTS_DIR)
+
+from health.common import new_results  # noqa: E402
+from health.packages import scan_packages  # noqa: E402
+from health.report import write_report  # noqa: E402
+from health.security import scan_security  # noqa: E402
+from health.stale import scan_stale  # noqa: E402
+from health.workflows import scan_workflows  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:

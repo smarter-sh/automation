@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The ``workflow`` scan: full-SHA action pins, explicit token permissions, and job timeouts in workflow files.
 
-Part of :mod:`organization_health`, which runs it; see that module for the scans and how
+Part of :mod:`health.organization_health`, which runs it; see that module for the scans and how
 they are run. It uses only Python's standard library and ``gh``.
 """
 
@@ -9,7 +9,7 @@ import re
 import subprocess  # nosec B404: only for CalledProcessError
 from urllib.parse import quote
 
-from health_common import (
+from health.common import (
     add_finding,
     file_text,
     is_branch_name,

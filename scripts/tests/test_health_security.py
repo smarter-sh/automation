@@ -1,4 +1,4 @@
-"""Tests of scripts/health_security.py, the ``security`` scan.
+"""Tests of scripts/health/security.py, the ``security`` scan.
 
 No test reaches GitHub.
 """
@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 import github_cli
-import health_security as security
+from health import security as security
 from tests.health_fixtures import REPOSITORY, api_error
 
 

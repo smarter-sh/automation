@@ -1,4 +1,4 @@
-"""Test scripts/pod_log_review_slack.py, which tells Slack what the pod log review did."""
+"""Test scripts/pod_log/review_slack.py, which tells Slack what the pod log review did."""
 
 import io
 import sys
@@ -8,15 +8,15 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-import pod_log_review_slack
-from pod_log_review_slack import (
+from pod_log import review_slack as pod_log_review_slack
+from pod_log.review_slack import (
     ACTION_LABELS,
     actions,
     clean_bill_of_health,
     escape,
     main,
 )
-from pod_log_review_stream import WRITE_TOOLS, PodInventory
+from pod_log.review_stream import WRITE_TOOLS, PodInventory
 from tests.pod_log_fixtures import (
     result_event,
     write_call,
@@ -48,7 +48,7 @@ class TestPodLogReviewSlack(unittest.TestCase):
         :returns: Its exit status, what it printed, and the mock of ``post()``.
         """
         stream = write_stream(self.root / "stream.jsonl", events)
-        argv = ["pod_log_review_slack.py", stream, "--channel", "smarter", "--title", "Pod log review"]
+        argv = ["pod_log/review_slack.py", stream, "--channel", "smarter", "--title", "Pod log review"]
         argv += ["--run-url", "https://example.com/run", "--log-dir", self.log_dir, "--since", "25h", *flags]
         output = io.StringIO()
         with (
@@ -118,7 +118,7 @@ class TestPodLogReviewSlack(unittest.TestCase):
 
     def test_a_refusal_fails(self):
         stream = write_stream(self.root / "stream.jsonl", CLOSED)
-        argv = ["pod_log_review_slack.py", stream, "--channel", "smarter", "--title", "T"]
+        argv = ["pod_log/review_slack.py", stream, "--channel", "smarter", "--title", "T"]
         with (
             mock.patch.object(sys, "argv", argv),
             mock.patch.dict("os.environ", {"SLACK_BOT_TOKEN": "xoxb-test"}),
@@ -130,7 +130,7 @@ class TestPodLogReviewSlack(unittest.TestCase):
         self.assertIn("not_in_channel", errors.getvalue())
 
     def test_a_missing_stream_fails(self):
-        argv = ["pod_log_review_slack.py", str(self.root / "missing.jsonl"), "--channel", "c", "--title", "T"]
+        argv = ["pod_log/review_slack.py", str(self.root / "missing.jsonl"), "--channel", "c", "--title", "T"]
         with mock.patch.object(sys, "argv", argv), redirect_stderr(io.StringIO()):
             self.assertEqual(main(), 1)
 

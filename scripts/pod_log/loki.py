@@ -3,7 +3,7 @@
 
 Usage::
 
-    python3 -E -s scripts/pod_log_loki.py --context <kube context> --namespace <namespace> \\
+    python3 -E -s scripts/pod_log/loki.py --context <kube context> --namespace <namespace> \\
         --log-dir <folder> [--since 25h]
 
 The pod log review (``.github/workflows/podLogReview.yml``) first runs smarter's
@@ -33,7 +33,7 @@ lines are in the same file, in order. MariaDB's pods are in ``mariadb/``, and a 
 a log too, though ``inventory/pods.txt`` does not list it.
 
 Alloy redacts email addresses, IP addresses, tokens, keys and passwords before Loki stores a line, and
-writes ``<email>``, ``<ip>`` or ``<redacted>`` in their place. ``pod_log_redact.py`` turns the first and
+writes ``<email>``, ``<ip>`` or ``<redacted>`` in their place. ``pod_log/redact.py`` turns the first and
 the last into its own placeholders, so that they are still reported as findings.
 
 Like every script that the workflow runs, it prints only counts and file names, never a log line: the

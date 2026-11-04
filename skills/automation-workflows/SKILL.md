@@ -121,7 +121,9 @@ Pull request titles, branch names, commit messages, issue text, package metadata
   `api_pages` for every page of a list, `api_object`, `http_status`, the organization's `repositories`),
   `result_files` (save results as JSON in one step or job and read them in another, one file or a folder of
   them), `scan_helpers` (`months_before`, `slack_escape`) and `slack_post`. A script that grows past a few
-  hundred lines splits into modules, as `organization_health` and its `health_*` modules do.
+  hundred lines becomes a package, a subfolder of `scripts/` with an `__init__.py`, as `scripts/health/` and
+  `scripts/pod_log/` are. Its entry point is still run by path, so it adds `scripts/` to `sys.path` before
+  importing the package's modules (`from health.common import ...`); see `scripts/health/organization_health.py`.
 - Write it for a Python beginner, **one operation per line**: name each intermediate value rather than nesting calls,
   comprehensions or conditions. The rule and its examples are under "Code style" in `automation-development`.
 - Test it in `scripts/tests/test_<name>.py` with `unittest`, faking every network call (`gh`, `urllib`, Slack).
