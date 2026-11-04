@@ -201,14 +201,14 @@ jobs:
       # own, beside smarter/ rather than around it: Claude Code reads every CLAUDE.md above its
       # working directory, and must see smarter's instructions and skills only.
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: automation
           persist-credentials: false
 
       # Claude Code runs here, and reads its code, history and skills.
       - name: Checkout smarter
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: smarter-sh/smarter
           path: smarter
@@ -234,7 +234,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -282,7 +282,7 @@ jobs:
         run: python3 -E -s "$SCRIPTS/pod_log_redact.py" "$LOG_DIR"
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
 
