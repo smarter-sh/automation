@@ -96,7 +96,8 @@ class LokiHandler(http.server.BaseHTTPRequestHandler):
             if fake.fail_query:
                 self.answer(500, {"status": "error"})
                 return
-            pod = params["query"].split('pod="')[1].split('"')[0]
+            after_pod = params["query"].split('pod="')[1]
+            pod = after_pod.split('"')[0]
             start = int(params["start"])
             end = int(params["end"])
             limit = int(params["limit"])
@@ -149,7 +150,8 @@ class TestHelpers(unittest.TestCase):
 
     def test_timestamp(self):
         when = datetime(2026, 11, 2, 14, 0, 0, tzinfo=timezone.utc)
-        value = int(when.timestamp()) * 1_000_000_000 + 123456789
+        seconds = int(when.timestamp())
+        value = seconds * 1_000_000_000 + 123456789
         self.assertEqual(timestamp(value), "2026-11-02T14:00:00.123456789Z", "as kubectl logs --timestamps writes it")
 
     def test_logql_string(self):
@@ -170,9 +172,8 @@ class TestLoki(FakeLokiTestCase):
         self.fake.add("smarter", "app-a", "smarter", [])
         self.fake.add("smarter", "app-a", "sidecar", [])
         streams = self.loki.streams(NAMESPACE, 0, now_ns())
-        self.assertEqual(
-            [(s.component, s.pod) for s in streams], [("smarter", "app-a"), ("smarter-worker", "worker-b")]
-        )
+        names = [(stream.component, stream.pod) for stream in streams]
+        self.assertEqual(names, [("smarter", "app-a"), ("smarter-worker", "worker-b")])
 
     def test_read_merges_containers_in_time_order(self):
         base = now_ns() - 10_000
@@ -180,7 +181,8 @@ class TestLoki(FakeLokiTestCase):
         self.fake.add("smarter", "app-a", "sidecar", [(base + 1, "first"), (base + 3, "third")])
         stream = Stream(component="smarter", pod="app-a")
         self.loki.read(stream, NAMESPACE, base, now_ns())
-        self.assertEqual([text for _, text in stream.lines], ["first", "second", "third", "fourth"])
+        texts = [text for _, text in stream.lines]
+        self.assertEqual(texts, ["first", "second", "third", "fourth"])
         self.assertFalse(stream.truncated)
 
     def test_read_pages(self):
@@ -191,7 +193,8 @@ class TestLoki(FakeLokiTestCase):
         stream = Stream(component="smarter", pod="app-a")
         with mock.patch.object(pod_log_loki, "PAGE_SIZE", 3):
             self.loki.read(stream, NAMESPACE, base, now_ns())
-        self.assertEqual([text for _, text in stream.lines], ["a", "b", "c1", "c2", "d", "e"])
+        texts = [text for _, text in stream.lines]
+        self.assertEqual(texts, ["a", "b", "c1", "c2", "d", "e"])
         self.assertGreater(len(self.fake.queries), 1)
         self.assertEqual(self.fake.queries[0]["direction"], "forward")
 
@@ -233,10 +236,8 @@ class TestFiles(unittest.TestCase):
             gone = Stream(component="mariadb", pod="smarter-mariadb-0", lines=[(1_793_628_000_000_000_001, "db")])
             self.assertEqual(write_logs([stream, gone], loki_dir), 2)
             replace_logs(log_dir, loki_dir)
-            self.assertEqual(
-                (log_dir / "smarter" / "app-a.log").read_text(encoding="utf-8"),
-                "2026-11-02T14:00:00.000000000Z from loki\n",
-            )
+            app_log = (log_dir / "smarter" / "app-a.log").read_text(encoding="utf-8")
+            self.assertEqual(app_log, "2026-11-02T14:00:00.000000000Z from loki\n")
             self.assertFalse((log_dir / "smarter" / "app-a.previous.log").exists(), "kubectl's logs are gone")
             self.assertTrue((log_dir / "mariadb" / "smarter-mariadb-0.log").exists())
             self.assertEqual((log_dir / "inventory" / "pods.txt").read_text(encoding="utf-8"), "kept")
@@ -276,7 +277,8 @@ class TestRun(FakeLokiTestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             self.assertTrue(pod_log_loki.run("ctx", NAMESPACE, self.log_dir, "25h"))
-        self.assertIn("from loki", (self.log_dir / "smarter" / "app-a.log").read_text(encoding="utf-8"))
+        app_log = (self.log_dir / "smarter" / "app-a.log").read_text(encoding="utf-8")
+        self.assertIn("from loki", app_log)
         self.assertTrue((self.log_dir / "mariadb" / "smarter-mariadb-0.log").exists())
         source = self.source()
         self.assertTrue(source.startswith("loki:"))
@@ -310,7 +312,8 @@ class TestRun(FakeLokiTestCase):
                 with redirect_stdout(output):
                     self.assertFalse(pod_log_loki.run("ctx", NAMESPACE, self.log_dir, "25h"))
                 self.assertIn("::warning::", output.getvalue())
-                self.assertEqual((self.log_dir / "smarter" / "app-a.log").read_text(encoding="utf-8"), "from kubectl\n")
+                app_log = (self.log_dir / "smarter" / "app-a.log").read_text(encoding="utf-8")
+                self.assertEqual(app_log, "from kubectl\n")
                 self.assertTrue(self.source().startswith("kubectl:"))
                 self.assertFalse((self.log_dir.parent / "logs.loki").exists())
 

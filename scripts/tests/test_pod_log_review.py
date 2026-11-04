@@ -34,6 +34,18 @@ OVERLOADED = result_event("API Error: Overloaded", is_error=True, api_error_stat
 OVER_BUDGET = result_event("", is_error=True, subtype="error_max_budget_usd")
 
 
+def option_value(command: list[str], option: str) -> str:
+    """
+    Return the argument that follows an option in a command line.
+
+    :param command: The command line.
+    :param option: The option, e.g. ``--settings``.
+    :returns: The argument after it.
+    """
+    position = command.index(option)
+    return command[position + 1]
+
+
 class PodLogReviewTestCase(unittest.TestCase):
     """Give each test a runner folder, a log folder, and the settings that point at them."""
 
@@ -109,14 +121,16 @@ class TestCommandLine(PodLogReviewTestCase):
         self.assertIn("- Deployed release (image tags): v0.40.4", text)
         self.assertIn("- Each log covers: the last 25h", text)
         self.assertIn("- Mode: Act:", text)
-        self.assertIn("- Mode: DRY RUN", prompt(replace(self.settings, dry_run=True)))
+        dry_run_settings = replace(self.settings, dry_run=True)
+        self.assertIn("- Mode: DRY RUN", prompt(dry_run_settings))
         self.assertIn("- Redactions: none", text)
         self.assertIn(f"following {pod_log_review.INSTRUCTIONS_FILE}. Read that file first.", text)
         self.assertTrue(os.path.isfile(pod_log_review.INSTRUCTIONS_FILE))
 
     def test_prompt_names_the_redactions(self):
         report = {"total": 3, "kinds": {"email": 2, "token": 1}, "files": {"smarter/a.log": {}, "smarter/b.log": {}}}
-        (Path(self.settings.log_dir) / "redactions.json").write_text(json.dumps(report), encoding="utf-8")
+        report_file = Path(self.settings.log_dir) / "redactions.json"
+        report_file.write_text(json.dumps(report), encoding="utf-8")
         text = prompt(self.settings)
         self.assertIn("- Redactions: 3 (email 2, token 1) in 2 file(s), listed in ", text)
         self.assertIn('Each one is a finding: see "Redactions are leaks".', text)
@@ -140,14 +154,15 @@ class TestCommandLine(PodLogReviewTestCase):
     def test_claude_command(self):
         command = claude_command(self.settings, "review")
         self.assertEqual(command[:3], ["claude", "-p", "review"])
-        disallowed = command[command.index("--disallowedTools") + 1]
+        disallowed = option_value(command, "--disallowedTools")
         self.assertEqual(disallowed, f"Read(/{self.root}/claude/**)")
         self.assertTrue(disallowed.startswith("Read(//"), "an absolute path in a permission rule starts with //")
         directories = [command[i + 1] for i, arg in enumerate(command) if arg == "--add-dir"]
         self.assertEqual(directories, [self.settings.log_dir, pod_log_review.PROMPTS_DIR])
-        settings_file = command[command.index("--settings") + 1]
+        settings_file = option_value(command, "--settings")
         self.assertEqual(settings_file, pod_log_review.PERMISSIONS_FILE)
-        self.assertTrue(os.path.isabs(settings_file) and os.path.isfile(settings_file))
+        self.assertTrue(os.path.isabs(settings_file))
+        self.assertTrue(os.path.isfile(settings_file))
 
 
 class TestRun(PodLogReviewTestCase):
@@ -178,7 +193,8 @@ class TestRun(PodLogReviewTestCase):
         return status, attempt.call_count, output.getvalue()
 
     def test_success(self):
-        self.assertEqual(self.run_review([OK, 0])[:2], (0, 1))
+        status, attempts, _ = self.run_review([OK, 0])
+        self.assertEqual((status, attempts), (0, 1))
 
     def test_a_transient_api_error_is_retried(self):
         status, attempts, output = self.run_review([OVERLOADED, 1], [OK, 0])
@@ -186,16 +202,21 @@ class TestRun(PodLogReviewTestCase):
         self.assertIn("api_error_status 529", output)
 
     def test_a_run_that_died_is_retried(self):
-        self.assertEqual(self.run_review([{"type": "system"}, '{"type": "assi', 137], [OK, 0])[:2], (0, 2))
+        killed = [{"type": "system"}, '{"type": "assi', 137]
+        status, attempts, _ = self.run_review(killed, [OK, 0])
+        self.assertEqual((status, attempts), (0, 2))
 
     def test_only_one_retry(self):
-        self.assertEqual(self.run_review([OVERLOADED, 1], [OVERLOADED, 1])[:2], (1, 2))
+        status, attempts, _ = self.run_review([OVERLOADED, 1], [OVERLOADED, 1])
+        self.assertEqual((status, attempts), (1, 2))
 
     def test_a_run_that_wrote_is_not_retried(self):
-        self.assertEqual(self.run_review([write_call(), OVERLOADED, 1])[:2], (1, 1))
+        status, attempts, _ = self.run_review([write_call(), OVERLOADED, 1])
+        self.assertEqual((status, attempts), (1, 1))
 
     def test_the_budget_is_not_retried(self):
-        self.assertEqual(self.run_review([OVER_BUDGET, 1])[:2], (1, 1))
+        status, attempts, _ = self.run_review([OVER_BUDGET, 1])
+        self.assertEqual((status, attempts), (1, 1))
 
     def test_worth_retrying(self):
         self.assertTrue(worth_retrying(None, 0))
@@ -224,7 +245,8 @@ class TestSummarize(PodLogReviewTestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             status = summarize(self.settings)
-        return status, Path(self.settings.github_step_summary).read_text(encoding="utf-8"), output.getvalue()
+        page = Path(self.settings.github_step_summary).read_text(encoding="utf-8")
+        return status, page, output.getvalue()
 
     def test_success(self):
         status, page, output = self.summarize([OK])

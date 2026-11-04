@@ -17,46 +17,21 @@ The scan uses only the Python standard library and the ``gh`` command, authentic
 """
 
 import argparse
-import calendar
 import json
-import re
 import subprocess  # nosec B404: only for CalledProcessError
 import sys
 from datetime import datetime, timezone
-from html import escape
 from pathlib import Path
 from urllib.parse import quote
 
-from github_cli import ORGANIZATION, error_line, run_json
+from github_cli import ORGANIZATION, api_pages, http_status
+from scan_helpers import months_before, slack_escape
 
-PAGE_SIZE = 100
 SCOPES = {
     "organization": "Organization secrets",
     "repository": "Repository secrets",
     "environment": "Environment secrets",
 }
-
-
-def subtract_months(now: datetime, months: int) -> datetime:
-    """Return the calendar date and time ``months`` before an aware datetime.
-
-    :param now: The cutoff reference time, with a timezone.
-    :param months: A positive whole number of calendar months.
-    :returns: The same local time and timezone on the clamped calendar date.
-    :raises ValueError: If ``now`` is naive or ``months`` is not a valid positive offset.
-    """
-    if months < 1:
-        raise ValueError("months must be a positive integer")
-    if now.tzinfo is None:
-        raise ValueError("now must be timezone-aware")
-    current_month_index = now.year * 12 + now.month - 1
-    target_month_index = current_month_index - months
-    year, month_offset = divmod(target_month_index, 12)
-    if year < 1:
-        raise ValueError("months is too large for the current date")
-    month = month_offset + 1
-    day = min(now.day, calendar.monthrange(year, month)[1])
-    return now.replace(year=year, month=month, day=day)
 
 
 def updated_datetime(value: str) -> datetime:
@@ -73,46 +48,6 @@ def updated_datetime(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def api_items(endpoint: str, key: str | None = None) -> list[dict]:
-    """Fetch every page from a GitHub REST list endpoint.
-
-    :param endpoint: The API endpoint, optionally with query parameters.
-    :param key: The object key containing the list, or ``None`` for a top-level list.
-    :returns: The concatenated list of response objects.
-    :raises subprocess.CalledProcessError: If a GitHub API request fails.
-    :raises ValueError: If GitHub returns an unexpected response shape.
-    """
-    items = []
-    page = 1
-    while True:
-        separator = "&" if "?" in endpoint else "?"
-        response = run_json("gh", "api", f"{endpoint}{separator}per_page={PAGE_SIZE}&page={page}")
-        if key is None:
-            values = response
-        elif isinstance(response, dict):
-            values = response.get(key)
-        else:
-            values = None
-        if not isinstance(values, list):
-            raise ValueError("GitHub returned an unexpected list response")
-        if any(not isinstance(item, dict) for item in values):
-            raise ValueError("GitHub returned an unexpected list item")
-        items.extend(values)
-        if len(values) < PAGE_SIZE:
-            return items
-        page += 1
-
-
-def api_status(error: subprocess.CalledProcessError) -> str:
-    """Return only the HTTP status code from a failed ``gh`` request, if present.
-
-    :param error: The failed ``gh`` command.
-    :returns: Its HTTP status code, or ``"unknown"`` if no code is present.
-    """
-    match = re.search(r"\bHTTP (\d{3})\b", error_line(error))
-    return match.group(1) if match else "unknown"
-
-
 def add_error(results: dict, scope: str, status: str = "invalid response") -> None:
     """Count a failed metadata request without recording repository or secret names.
 
@@ -121,7 +56,8 @@ def add_error(results: dict, scope: str, status: str = "invalid response") -> No
     :param status: A status code or safe error category.
     """
     key = f"{scope} ({status})"
-    results["errors"][key] = results["errors"].get(key, 0) + 1
+    errors = results["errors"]
+    errors[key] = errors.get(key, 0) + 1
 
 
 def collect_items(results: dict, endpoint: str, key: str | None, scope: str) -> list[dict]:
@@ -134,9 +70,9 @@ def collect_items(results: dict, endpoint: str, key: str | None, scope: str) -> 
     :returns: All response items, or an empty list after a recorded failure.
     """
     try:
-        return api_items(endpoint, key)
+        return api_pages(endpoint, key)
     except subprocess.CalledProcessError as error:
-        add_error(results, scope, api_status(error))
+        add_error(results, scope, http_status(error))
     except ValueError:
         add_error(results, scope)
     return []
@@ -153,17 +89,36 @@ def add_findings(results: dict, items: list[dict], scope: str, location: str, cu
     """
     for item in items:
         try:
-            name = item["name"]
-            updated_at = item["updated_at"]
-            if not isinstance(name, str) or not isinstance(updated_at, str):
-                raise ValueError("invalid secret metadata")
-            if updated_datetime(updated_at) < cutoff:
-                finding = {"scope": scope, "location": location, "name": name, "updated_at": updated_at}
-                if scope == "organization":
-                    finding["visibility"] = item.get("visibility", "unknown")
-                results["findings"].append(finding)
+            finding = _old_secret(item, scope, location, cutoff)
         except (KeyError, ValueError):
             add_error(results, SCOPES[scope])
+            continue
+        if finding:
+            results["findings"].append(finding)
+
+
+def _old_secret(item: dict, scope: str, location: str, cutoff: datetime) -> dict | None:
+    """Turn one secret's metadata into a finding, when the secret is older than the cutoff.
+
+    :param item: The secret's metadata, as GitHub returned it.
+    :param scope: The secret scope, as a key in :data:`SCOPES`.
+    :param location: The organization, repository, or repository/environment label.
+    :param cutoff: The UTC timestamp before which a secret is considered outdated.
+    :returns: The finding, or ``None`` when the secret was updated since the cutoff.
+    :raises KeyError: If the metadata has no name or update time.
+    :raises ValueError: If the name or update time is malformed.
+    """
+    name = item["name"]
+    updated_at = item["updated_at"]
+    if not isinstance(name, str) or not isinstance(updated_at, str):
+        raise ValueError("invalid secret metadata")
+    updated = updated_datetime(updated_at)
+    if updated >= cutoff:
+        return None
+    finding = {"scope": scope, "location": location, "name": name, "updated_at": updated_at}
+    if scope == "organization":
+        finding["visibility"] = item.get("visibility", "unknown")
+    return finding
 
 
 def scan(months: int, now: datetime | None = None) -> dict:
@@ -177,7 +132,8 @@ def scan(months: int, now: datetime | None = None) -> dict:
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
-    cutoff = subtract_months(now.astimezone(timezone.utc), months)
+    now_utc = now.astimezone(timezone.utc)
+    cutoff = months_before(now_utc, months)
     results = {
         "months": months,
         "cutoff": cutoff.isoformat(),
@@ -194,31 +150,37 @@ def scan(months: int, now: datetime | None = None) -> dict:
     results["repositories_scanned"] = len(repositories)
     for repository in repositories:
         name = repository.get("full_name")
-        if not isinstance(name, str) or not name.startswith(f"{ORGANIZATION}/"):
+        is_organization_repository = isinstance(name, str) and name.startswith(f"{ORGANIZATION}/")
+        if not is_organization_repository:
             add_error(results, "Repository inventory")
             continue
-
-        secrets = collect_items(results, f"repos/{name}/actions/secrets", "secrets", SCOPES["repository"])
-        add_findings(results, secrets, "repository", name, cutoff)
-
-        environments = collect_items(results, f"repos/{name}/environments", "environments", "Environment listing")
-        results["environments_scanned"] += len(environments)
-        for environment in environments:
-            environment_name = environment.get("name")
-            if not isinstance(environment_name, str):
-                add_error(results, "Environment listing")
-                continue
-            encoded_name = quote(environment_name, safe="")
-            env_secrets = collect_items(
-                results,
-                f"repos/{name}/environments/{encoded_name}/secrets",
-                "secrets",
-                SCOPES["environment"],
-            )
-            add_findings(results, env_secrets, "environment", f"{name} / {environment_name}", cutoff)
+        _scan_repository(results, name, cutoff)
 
     results["findings"].sort(key=lambda item: (item["scope"], item["location"], item["name"]))
     return results
+
+
+def _scan_repository(results: dict, name: str, cutoff: datetime) -> None:
+    """Read one repository's secret metadata, and its environments'.
+
+    :param results: The mutable scan results.
+    :param name: The repository, as ``owner/name``.
+    :param cutoff: The UTC timestamp before which a secret is considered outdated.
+    """
+    secrets = collect_items(results, f"repos/{name}/actions/secrets", "secrets", SCOPES["repository"])
+    add_findings(results, secrets, "repository", name, cutoff)
+
+    environments = collect_items(results, f"repos/{name}/environments", "environments", "Environment listing")
+    results["environments_scanned"] += len(environments)
+    for environment in environments:
+        environment_name = environment.get("name")
+        if not isinstance(environment_name, str):
+            add_error(results, "Environment listing")
+            continue
+        encoded_name = quote(environment_name, safe="")
+        endpoint = f"repos/{name}/environments/{encoded_name}/secrets"
+        env_secrets = collect_items(results, endpoint, "secrets", SCOPES["environment"])
+        add_findings(results, env_secrets, "environment", f"{name} / {environment_name}", cutoff)
 
 
 def slack_text(results: dict, run_url: str) -> str:
@@ -229,38 +191,52 @@ def slack_text(results: dict, run_url: str) -> str:
     :returns: A Slack mrkdwn report with outdated names and last-updated dates.
     """
     months = results["months"]
-    cutoff = updated_datetime(results["cutoff"]).strftime("%Y-%m-%d %H:%M UTC")
+    cutoff_time = updated_datetime(results["cutoff"])
+    cutoff = cutoff_time.strftime("%Y-%m-%d %H:%M UTC")
     lines = [f"*GitHub Actions secrets not updated in more than {months} months*", f"Cutoff: {cutoff}."]
     if not results["findings"] and not results["errors"]:
         lines.append("No outdated secrets found.")
     else:
         for scope in ("organization", "repository", "environment"):
-            findings = [item for item in results["findings"] if item["scope"] == scope]
-            if findings:
-                lines.append(f"\n*{SCOPES[scope]}*")
-                for item in findings:
-                    suffix = f" · visibility: {item['visibility']}" if scope == "organization" else ""
-                    updated = updated_datetime(item["updated_at"]).strftime("%Y-%m-%d")
-                    lines.append(
-                        f"• {slack_escape(item['location'])} · {slack_escape(item['name'])}"
-                        f" · last updated {updated}{suffix}"
-                    )
+            lines += _slack_scope_lines(results["findings"], scope)
         if results["errors"]:
-            total = sum(results["errors"].values())
-            lines.append(f"\n⚠️ Scan incomplete: {total} GitHub API request(s) failed.")
-            for label, count in sorted(results["errors"].items()):
-                lines.append(f"• {slack_escape(label)}: {count}")
+            lines += _slack_error_lines(results["errors"])
     lines.append(f"\n<{run_url}|View workflow run>")
     return "\n".join(lines)
 
 
-def slack_escape(value: str) -> str:
-    """Escape API-controlled text so it cannot create Slack links or mentions.
+def _slack_scope_lines(findings: list[dict], scope: str) -> list[str]:
+    """Format one scope's findings for Slack: a heading, then one line per outdated secret.
 
-    :param value: A secret name, location, or other API-provided label.
-    :returns: The value with HTML-sensitive characters escaped.
+    :param findings: Every finding from :func:`scan`.
+    :param scope: The secret scope, as a key in :data:`SCOPES`.
+    :returns: The lines, or none when the scope has no findings.
     """
-    return escape(value, quote=False)
+    scope_findings = [item for item in findings if item["scope"] == scope]
+    if not scope_findings:
+        return []
+    lines = [f"\n*{SCOPES[scope]}*"]
+    for item in scope_findings:
+        suffix = f" · visibility: {item['visibility']}" if scope == "organization" else ""
+        updated_time = updated_datetime(item["updated_at"])
+        updated = updated_time.strftime("%Y-%m-%d")
+        location = slack_escape(item["location"])
+        name = slack_escape(item["name"])
+        lines.append(f"• {location} · {name} · last updated {updated}{suffix}")
+    return lines
+
+
+def _slack_error_lines(errors: dict) -> list[str]:
+    """Format the failed metadata requests for Slack: a total, then one line per kind of failure.
+
+    :param errors: The failure counts from :func:`scan`, by label.
+    :returns: The lines.
+    """
+    total = sum(errors.values())
+    lines = [f"\n⚠️ Scan incomplete: {total} GitHub API request(s) failed."]
+    for label, count in sorted(errors.items()):
+        lines.append(f"• {slack_escape(label)}: {count}")
+    return lines
 
 
 def write_report(results: dict, run_url: str, summary_path: str, slack_path: str, dry_run: bool) -> None:
@@ -279,6 +255,7 @@ def write_report(results: dict, run_url: str, summary_path: str, slack_path: str
         scope = item["scope"]
         counts[scope] += 1
     total = sum(counts.values())
+    failures = sum(results["errors"].values())
     lines = [
         "## GitHub Actions secret age review",
         "",
@@ -287,14 +264,16 @@ def write_report(results: dict, run_url: str, summary_path: str, slack_path: str
         f"- Environments checked: {results['environments_scanned']}.",
         f"- Outdated secrets: {total} (organization: {counts['organization']}, "
         f"repository: {counts['repository']}, environment: {counts['environment']}).",
-        f"- Metadata request failures: {sum(results['errors'].values())}.",
-        f"- The Slack report contains detailed findings; secret names are omitted from this public run summary.",
+        f"- Metadata request failures: {failures}.",
+        "- The Slack report contains detailed findings; secret names are omitted from this public run summary.",
         f"- Run: {run_url}",
     ]
     if dry_run:
         lines.append("- Dry run: nothing was posted to Slack.")
-    Path(summary_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
-    Path(slack_path).write_text(slack_text(results, run_url) + "\n", encoding="utf-8")
+    summary = "\n".join(lines) + "\n"
+    slack = slack_text(results, run_url) + "\n"
+    Path(summary_path).write_text(summary, encoding="utf-8")
+    Path(slack_path).write_text(slack, encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -304,6 +283,28 @@ def main(argv: list[str] | None = None) -> int:
     :returns: 0 on success; 1 when the scan encountered GitHub API errors.
     :raises OSError: If scan results or reports cannot be read or written.
     :raises ValueError: If the saved scan results are invalid JSON.
+    """
+    parser = _parser()
+    args = parser.parse_args(argv)
+
+    if args.command == "run":
+        if args.months < 1:
+            parser.error("--months must be a positive integer")
+        results = scan(args.months)
+        text = json.dumps(results)
+        Path(args.results).write_text(text, encoding="utf-8")
+        return 1 if results["errors"] else 0
+
+    text = Path(args.results).read_text(encoding="utf-8")
+    results = json.loads(text)
+    write_report(results, args.run_url, args.summary, args.slack_output, args.dry_run)
+    return 0
+
+
+def _parser() -> argparse.ArgumentParser:
+    """Build the command line's parser: ``run`` or ``report``.
+
+    :returns: The parser, with the subcommand's name in ``command``.
     """
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -316,18 +317,7 @@ def main(argv: list[str] | None = None) -> int:
     report_parser.add_argument("--summary", required=True)
     report_parser.add_argument("--slack-output", required=True)
     report_parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args(argv)
-
-    if args.command == "run":
-        if args.months < 1:
-            parser.error("--months must be a positive integer")
-        results = scan(args.months)
-        Path(args.results).write_text(json.dumps(results), encoding="utf-8")
-        return 1 if results["errors"] else 0
-
-    results = json.loads(Path(args.results).read_text(encoding="utf-8"))
-    write_report(results, args.run_url, args.summary, args.slack_output, args.dry_run)
-    return 0
+    return parser
 
 
 if __name__ == "__main__":

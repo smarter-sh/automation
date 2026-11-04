@@ -1,7 +1,7 @@
 [flake8]
-ignore = D205,D413,D400,D401
+# E203 and W503 disagree with black, which formats the code.
+ignore = D205,D413,D400,D401,E203,W503
 max-line-length =120
 max-complexity = 10
 exclude = "venv"
 extend-exclude = "*__init__.py,*__version__.py,venv"
-select = "C101"

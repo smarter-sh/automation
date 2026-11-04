@@ -52,7 +52,12 @@ def write_stream(path: Path, events: Sequence[JsonObject | str]) -> str:
     :param events: The events. A string is written as is, e.g. a line cut off mid-write.
     :returns: The path, as a string.
     """
-    lines = [event if isinstance(event, str) else json.dumps(event) for event in events]
+    lines = []
+    for event in events:
+        if isinstance(event, str):
+            lines.append(event)
+        else:
+            lines.append(json.dumps(event))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return str(path)
 
@@ -76,8 +81,9 @@ def write_log_dir(root: Path, worker_restarts: int = 0) -> str:
         "smarter-worker/smarter-worker-x-1.previous.log",
         "smarter-beat/smarter-beat-z-1.log",
     ):
-        (logs / name).parent.mkdir(parents=True, exist_ok=True)
-        (logs / name).write_text("", encoding="utf-8")
+        log = logs / name
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("", encoding="utf-8")
     (logs / "inventory").mkdir()
     (logs / "inventory" / "pods.txt").write_text(
         "NAME                 READY   STATUS      RESTARTS      AGE\n"

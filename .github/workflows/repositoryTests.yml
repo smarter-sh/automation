@@ -2,11 +2,12 @@
 #------------------------------------------------------------------------------
 # Repository Tests.
 #
-# Every night, starts the test workflow (.github/workflows/tests.yml, or
-# test.yml) of every smarter-sh repository that isn't archived, on its default
-# branch, waits for every run, and posts the results to Slack: a clean bill of
-# health, or the suites that failed, with links to their runs. A repository
-# without a test workflow is left out; one whose workflow is disabled, or has no
+# Every night, starts the test workflow (.github/workflows/tests.yml, test.yml,
+# ci.yml or checks.yml, the first one found) of every smarter-sh repository
+# that isn't archived, on its default branch, waits for every run, and posts
+# the results to Slack: a clean bill of health, or the suites that failed, with
+# links to their runs. A repository without a test workflow isn't tested, and
+# is listed on the run's page only; one whose workflow is disabled, or has no
 # workflow_dispatch trigger, is reported as not started.
 #
 # 08:13 UTC is 2:13 Central Standard Time (3:13 during daylight saving time),

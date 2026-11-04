@@ -76,7 +76,8 @@ class TestPodLogReviewSlack(unittest.TestCase):
         self.assertIn(":package: Release v0.40.4", output)
 
     def test_a_healthy_verdict_with_redactions_posts_nothing(self):
-        (Path(self.log_dir) / "redactions.json").write_text('{"total": 1}', encoding="utf-8")
+        report_file = Path(self.log_dir) / "redactions.json"
+        report_file.write_text('{"total": 1}', encoding="utf-8")
         status, output, post = self.main([result_event()], token="xoxb-test")
         self.assertEqual(status, 0)
         self.assertIn("nothing is posted", output)
@@ -98,7 +99,8 @@ class TestPodLogReviewSlack(unittest.TestCase):
 
     def test_a_failed_write_is_not_listed(self):
         events = [write_call("create_issue", "t1"), write_result("GitHub refused it", "t1", is_error=True)]
-        self.assertEqual(actions(write_stream(self.root / "s.jsonl", events)), [])
+        stream = write_stream(self.root / "s.jsonl", events)
+        self.assertEqual(actions(stream), [])
 
     def test_posts_with_the_token(self):
         status, output, post = self.main([*CLOSED], token="xoxb-test")

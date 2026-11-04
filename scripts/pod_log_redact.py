@@ -199,11 +199,15 @@ def redact_match(match: re.Match, kind: str, counts: collections.Counter) -> str
     """
     whole = match.group(0)
     if "value" not in match.re.groupindex:
-        start, end = 0, len(whole)
-    elif match.group("value").startswith("<redacted"):
-        return whole
+        start = 0
+        end = len(whole)
     else:
-        start, end = match.start("value") - match.start(), match.end("value") - match.start()
+        value = match.group("value")
+        if value.startswith("<redacted"):
+            return whole
+        # the value's position within the whole match, not within the text.
+        start = match.start("value") - match.start()
+        end = match.end("value") - match.start()
     counts[kind] += 1
     return f"{whole[:start]}<redacted:{kind}>{whole[end:]}"
 
@@ -221,7 +225,9 @@ def redact_ip(match: re.Match, counts: collections.Counter) -> str:
         address = ipaddress.ip_address(value)
     except ValueError:
         return value
-    if value in KEEP_IPS or address.is_private or address.is_loopback:
+    is_kept = value in KEEP_IPS
+    is_internal = address.is_private or address.is_loopback
+    if is_kept or is_internal:
         return value
     counts["ip-address"] += 1
     return "<redacted:ip-address>"
@@ -245,8 +251,10 @@ def redact(text: str, counts: collections.Counter) -> str:
             counts[kind] += found
     for kind, pattern in PATTERNS:
         # sub() calls the function with each match, and puts what it returns in the match's place.
-        text = pattern.sub(functools.partial(redact_match, kind=kind, counts=counts), text)
-    return IP_ADDRESS.sub(functools.partial(redact_ip, counts=counts), text)
+        replace_match = functools.partial(redact_match, kind=kind, counts=counts)
+        text = pattern.sub(replace_match, text)
+    replace_ip = functools.partial(redact_ip, counts=counts)
+    return IP_ADDRESS.sub(replace_ip, text)
 
 
 def locate(text: str) -> dict[str, dict]:
@@ -258,12 +266,17 @@ def locate(text: str) -> dict[str, dict]:
         :data:`MAX_LINES` line numbers, counted from 1, per kind. Empty if there are none.
     """
     found: dict[str, dict] = {}
-    for number, line in enumerate(text.splitlines(), start=1):
+    lines = text.splitlines()
+    for number, line in enumerate(lines, start=1):
         for match in PLACEHOLDER.finditer(line):
-            entry = found.setdefault(match.group("kind"), {"count": 0, "lines": []})
+            kind = match.group("kind")
+            entry = found.setdefault(kind, {"count": 0, "lines": []})
             entry["count"] += 1
-            if len(entry["lines"]) < MAX_LINES and entry["lines"][-1:] != [number]:
-                entry["lines"].append(number)
+            line_numbers = entry["lines"]
+            has_room = len(line_numbers) < MAX_LINES
+            is_new_line = line_numbers[-1:] != [number]
+            if has_room and is_new_line:
+                line_numbers.append(number)
     return found
 
 
@@ -277,11 +290,77 @@ def read_report(folder: str) -> dict:
     """
     if not folder:
         return {}
+    path = pathlib.Path(folder) / REPORT_NAME
     try:
-        report = json.loads((pathlib.Path(folder) / REPORT_NAME).read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        report = json.loads(text)
     except (OSError, ValueError):
         return {}
-    return report if isinstance(report, dict) else {}
+    if not isinstance(report, dict):
+        return {}
+    return report
+
+
+def _log_files(folder: pathlib.Path) -> list[pathlib.Path]:
+    """
+    List every ``.log`` and ``.txt`` file under a folder, at any depth.
+
+    :param folder: The folder, e.g. the one ``download-logs.sh`` wrote.
+    :returns: The files, sorted, e.g. ``smarter/<pod>.log`` and ``inventory/pods.txt``.
+    """
+    files = []
+    for path in folder.rglob("*"):
+        is_log = path.suffix in (".log", ".txt")
+        if is_log and path.is_file():
+            files.append(path)
+    files.sort()
+    return files
+
+
+def _redact_file(path: pathlib.Path) -> str:
+    """
+    Redact one file in place.
+
+    :param path: The file.
+    :returns: Its redacted text.
+    """
+    # errors="replace" turns bytes that aren't UTF-8 into "�" rather than failing on them.
+    original = path.read_text(encoding="utf-8", errors="replace")
+    text = redact(original, collections.Counter())
+    path.write_text(text, encoding="utf-8")
+    return text
+
+
+def _write_report(folder: pathlib.Path, total: collections.Counter, where: dict[str, dict]) -> dict:
+    """
+    Write :data:`REPORT_NAME` in the folder.
+
+    :param folder: The folder of logs.
+    :param total: The placeholders of every file, by kind.
+    :param where: Where they are, by file.
+    :returns: The report that was written.
+    """
+    kinds = dict(sorted(total.items()))
+    report = {"total": sum(total.values()), "kinds": kinds, "files": where}
+    report_json = json.dumps(report, indent=2)
+    report_path = folder / REPORT_NAME
+    report_path.write_text(report_json + "\n", encoding="utf-8")
+    return report
+
+
+def _summary(total: collections.Counter) -> str:
+    """
+    Describe the placeholders of every file, for the workflow's log.
+
+    :param total: The placeholders, by kind.
+    :returns: E.g. ``email 3, token 1``, or ``nothing``.
+    """
+    parts = []
+    for kind, count in sorted(total.items()):
+        parts.append(f"{kind} {count}")
+    if not parts:
+        return "nothing"
+    return ", ".join(parts)
 
 
 def main() -> int:
@@ -305,21 +384,20 @@ def main() -> int:
     total: collections.Counter = collections.Counter()
     # where they are, by file, e.g. {"smarter/<pod>.log": {"email": {"count": 3, "lines": [...]}}}.
     where: dict[str, dict] = {}
-    # every .log and .txt file under the folder, at any depth, e.g. smarter/<pod>.log and inventory/pods.txt.
-    files = sorted(p for p in folder.rglob("*") if p.is_file() and p.suffix in (".log", ".txt"))
+    files = _log_files(folder)
     for path in files:
-        # errors="replace" turns bytes that aren't UTF-8 into "�" rather than failing on them.
-        text = redact(path.read_text(encoding="utf-8", errors="replace"), collections.Counter())
-        path.write_text(text, encoding="utf-8")
+        text = _redact_file(path)
         # counted from the placeholders in the redacted text, so that running the script twice
         # on the same folder reports the same thing.
         found = locate(text)
-        if found:
-            where[path.relative_to(folder).as_posix()] = found
-            total.update({kind: entry["count"] for kind, entry in found.items()})
-    report = {"total": sum(total.values()), "kinds": dict(sorted(total.items())), "files": where}
-    (folder / REPORT_NAME).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    summary = ", ".join(f"{kind} {count}" for kind, count in sorted(total.items())) or "nothing"
+        if not found:
+            continue
+        relative_path = path.relative_to(folder).as_posix()
+        where[relative_path] = found
+        for kind, entry in found.items():
+            total[kind] += entry["count"]
+    report = _write_report(folder, total, where)
+    summary = _summary(total)
     print(f"redacted {len(files)} file(s): {summary}")
     if total:
         print(

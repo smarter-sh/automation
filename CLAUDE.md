@@ -65,6 +65,8 @@ gh run list --workflow <file>.yml --limit 5
 
 ## Conventions
 
+- **Python for beginners, one operation per line.** Name each intermediate value instead of nesting calls,
+  comprehensions or conditions. The rule and its examples are under "Code style" in `automation-development`.
 - **Pattern first.** Read the newest two or three workflows here (and, while jobs are still moving over, the
   scheduled workflows in `../smarter/.github/workflows/`) and copy their shape: the header comment, the
   `schedule` + `workflow_dispatch` triggers, `dry-run`, `concurrency`, `permissions: contents: read`,

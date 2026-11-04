@@ -93,11 +93,13 @@ class TestPodLogRedact(unittest.TestCase):
             with mock.patch.object(sys, "argv", ["pod_log_redact.py", folder]), redirect_stdout(output):
                 self.assertEqual(main(), 0)
             self.assertEqual(log.read_text(encoding="utf-8"), "mail <redacted:email>\n")
-            first, warning = output.getvalue().strip().splitlines()
+            printed = output.getvalue().strip()
+            first, warning = printed.splitlines()
             self.assertEqual(first, "redacted 1 file(s): email 1")
             self.assertTrue(warning.startswith("::warning::1 redaction(s) in 1 log(s)"))
             self.assertNotIn("someone", output.getvalue())
-            report = json.loads((Path(folder) / REPORT_NAME).read_text(encoding="utf-8"))
+            report_text = (Path(folder) / REPORT_NAME).read_text(encoding="utf-8")
+            report = json.loads(report_text)
             self.assertEqual(
                 report,
                 {
@@ -106,7 +108,8 @@ class TestPodLogRedact(unittest.TestCase):
                     "files": {"smarter/pod.log": {"email": {"count": 1, "lines": [1]}}},
                 },
             )
-            self.assertNotIn("someone", json.dumps(report), "the report never holds a value")
+            report_json = json.dumps(report)
+            self.assertNotIn("someone", report_json, "the report never holds a value")
             # a second run reports the placeholders that are already there, the same way.
             with mock.patch.object(sys, "argv", ["pod_log_redact.py", folder]), redirect_stdout(io.StringIO()):
                 self.assertEqual(main(), 0)

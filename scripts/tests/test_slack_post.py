@@ -25,7 +25,8 @@ def run(argv, stdin, environ):
 
     Returns (exit code, stdout, stderr).
     """
-    out, err = io.StringIO(), io.StringIO()
+    out = io.StringIO()
+    err = io.StringIO()
     with (
         mock.patch("sys.stdin", io.StringIO(stdin)),
         mock.patch("sys.stderr", err),
@@ -98,7 +99,8 @@ class TestPost(unittest.TestCase):
         body = b'{"ok": true, "channel": "C1", "ts": "1.2"}'
         with mock.patch("urllib.request.urlopen", return_value=self.response(body)) as urlopen:
             answer = slack_post.post("C1", "<https://blog.smarter.sh/x/|x>", "xoxb-test", unfurl=True)
-        sent = json.loads(urlopen.call_args.args[0].data)
+        request = urlopen.call_args.args[0]
+        sent = json.loads(request.data)
         self.assertEqual((sent["unfurl_links"], sent["unfurl_media"]), (True, True))
         self.assertEqual((answer["channel"], answer["ts"]), ("C1", "1.2"))
 

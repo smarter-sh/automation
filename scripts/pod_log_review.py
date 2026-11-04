@@ -264,6 +264,66 @@ def log_source(log_dir: str) -> str:
     return first_line
 
 
+def release_names(log_dir: str) -> str:
+    """
+    Name the deployed release, from the image tags in the log folder's inventory.
+
+    :param log_dir: The log folder.
+    :returns: The tags, joined by commas, or a pointer to ``inventory/images.txt`` if there are none.
+    """
+    inventory = PodInventory.read(log_dir)
+    releases = ", ".join(inventory.releases)
+    return releases or "unknown, see inventory/images.txt"
+
+
+def review_mode(dry_run: bool) -> str:
+    """
+    Tell Claude whether to write to GitHub.
+
+    :param dry_run: Whether the run writes nothing to GitHub.
+    :returns: The prompt's mode line, without its label.
+    """
+    if dry_run:
+        return "DRY RUN: write nothing to GitHub. Report what you would have opened, commented, closed and proposed."
+    return "Act: write issues, comments, closings and pull requests within the limits."
+
+
+def log_span(since: str, source: str) -> str:
+    """
+    Say how far back each log reaches.
+
+    :param since: The ``SINCE`` setting, e.g. ``25h``, or empty.
+    :param source: Where the logs came from, from :func:`log_source`.
+    :returns: E.g. ``the last 25h``.
+    """
+    if since:
+        return f"the last {since}"
+    if source.startswith("loki:"):
+        return "the last 72 hours, all that Loki keeps"
+    return "the lifetime of the container"
+
+
+def describe_redactions(log_dir: str) -> str:
+    """
+    Describe what ``pod_log_redact.py`` redacted from the logs, for the prompt.
+
+    :param log_dir: The log folder, which holds the redaction report.
+    :returns: The count, by kind and in how many files, and where the report is, or ``none``.
+    """
+    report = read_report(log_dir)
+    total = report.get("total")
+    if not total:
+        return "none"
+    counts = report.get("kinds", {})
+    kinds = ", ".join(f"{kind} {count}" for kind, count in counts.items())
+    files = report.get("files", {})
+    report_path = os.path.join(log_dir, REPORT_NAME)
+    return (
+        f"{total} ({kinds}) in {len(files)} file(s), listed in "
+        f'{report_path}. Each one is a finding: see "Redactions are leaks".'
+    )
+
+
 def prompt(settings: Settings) -> str:
     """
     Return the message that starts the review: the run's parameters.
@@ -274,28 +334,12 @@ def prompt(settings: Settings) -> str:
     :param settings: The review's settings.
     :returns: The message.
     """
-    releases = ", ".join(PodInventory.read(settings.log_dir).releases) or "unknown, see inventory/images.txt"
-    if settings.dry_run:
-        mode = "DRY RUN: write nothing to GitHub. Report what you would have opened, commented, closed and proposed."
-    else:
-        mode = "Act: write issues, comments, closings and pull requests within the limits."
+    releases = release_names(settings.log_dir)
+    mode = review_mode(settings.dry_run)
     source = log_source(settings.log_dir)
-    from_loki = source.startswith("loki:")
-    if settings.since:
-        span = f"the last {settings.since}"
-    elif from_loki:
-        span = "the last 72 hours, all that Loki keeps"
-    else:
-        span = "the lifetime of the container"
-    report = read_report(settings.log_dir)
-    if report.get("total"):
-        kinds = ", ".join(f"{kind} {count}" for kind, count in report.get("kinds", {}).items())
-        redactions = (
-            f"{report['total']} ({kinds}) in {len(report.get('files', {}))} file(s), listed in "
-            f'{os.path.join(settings.log_dir, REPORT_NAME)}. Each one is a finding: see "Redactions are leaks".'
-        )
-    else:
-        redactions = "none"
+    span = log_span(settings.since, source)
+    redactions = describe_redactions(settings.log_dir)
+    today = datetime.now(timezone.utc)
     limits = (
         f"{settings.max_new_issues} new issues, {settings.max_comments} comments, "
         f"{settings.max_closed_issues} closed issues, {settings.max_pull_requests} pull requests"
@@ -311,7 +355,7 @@ def prompt(settings: Settings) -> str:
             f"- Each log covers: {span}",
             f"- Deployed release (image tags): {releases}",
             f"- Redactions: {redactions}",
-            f"- Date: {datetime.now(timezone.utc):%Y-%m-%d}",
+            f"- Date: {today:%Y-%m-%d}",
             f"- Workflow run: {settings.run_url}",
             f"- Pull request base branch: {settings.pr_base}",
             f"- Limits for this run: {limits}",
@@ -375,9 +419,8 @@ def review_once(settings: Settings, command: list[str], env: dict[str, str]) -> 
     :returns: Claude Code's exit status.
     """
     with open(settings.stream_path, "w", encoding="utf-8") as stream:
-        return subprocess.run(  # nosec B603
-            command, cwd=settings.smarter_dir, env=env, stdout=stream, check=False
-        ).returncode
+        completed = subprocess.run(command, cwd=settings.smarter_dir, env=env, stdout=stream, check=False)  # nosec B603
+    return completed.returncode
 
 
 def succeeded(status: int, result: ReviewResult | None) -> bool:
@@ -388,7 +431,9 @@ def succeeded(status: int, result: ReviewResult | None) -> bool:
     :param result: How the run ended, or None if it never finished.
     :returns: Whether the command exited successfully and produced a non-error result.
     """
-    return status == 0 and result is not None and not result.is_error
+    if status != 0 or result is None:
+        return False
+    return not result.is_error
 
 
 def worth_retrying(result: ReviewResult | None, writes: int) -> bool:
@@ -431,7 +476,8 @@ def run(settings: Settings) -> int:
         writes = write_attempts(settings.stream_path)
         ending = result.describe() if result else "did not finish"
         print(f"Attempt {attempt} failed: exit status {status}, {ending}, GitHub writes: {writes}.")
-        if attempt == ATTEMPTS or not worth_retrying(result, writes):
+        is_last_attempt = attempt == ATTEMPTS
+        if is_last_attempt or not worth_retrying(result, writes):
             return 1
         print(f"Retrying in {RETRY_DELAY_SECONDS} seconds.")
         time.sleep(RETRY_DELAY_SECONDS)
@@ -454,8 +500,10 @@ def summarize(settings: Settings) -> int:
         if result is None:
             summary.write("Claude Code did not finish: see the step above.\n")
             return 0
-        answer = (result.answer or "Claude Code returned no summary.")[:MAX_SUMMARY_CHARS]
-        summary.write(f"# Pod log review: {settings.environment}\n\n{answer}\n\n---\n{result.describe()}\n")
+        answer = result.answer or "Claude Code returned no summary."
+        answer = answer[:MAX_SUMMARY_CHARS]
+        description = result.describe()
+        summary.write(f"# Pod log review: {settings.environment}\n\n{answer}\n\n---\n{description}\n")
     if not result.is_error:
         return 0
     print(f"Claude Code failed: {result.describe()}")
@@ -474,7 +522,9 @@ def main() -> int:
     parser.add_argument("command", choices=("run", "summarize"), help="run the review, or summarize it")
     args = parser.parse_args()
     settings = Settings.from_env()
-    return run(settings) if args.command == "run" else summarize(settings)
+    if args.command == "run":
+        return run(settings)
+    return summarize(settings)
 
 
 if __name__ == "__main__":
