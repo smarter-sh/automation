@@ -42,16 +42,24 @@ When the user asks for the commits of every repository with changes (the checkou
 cd ~/Desktop/gh/smarter-sh && for d in */; do [ -n "$(git -C "$d" status --porcelain 2>/dev/null)" ] && echo "$d"; done
 ```
 
-Then write **one code block per repository**, ready to paste into the terminal as it is, with the `cd`, the `git add`
-and the `git commit` together, chained with `&&` so that nothing is committed in the wrong directory:
+Then write **one code block per repository**, ready to paste into the terminal as it is: the `cd`, the venv's
+activation (so that the pre-commit hooks run with the repository's tools), the `git add`, the `git commit`, and last
+`git pull && git push`, all chained with `&&` so that nothing is committed or pushed from the wrong directory, or
+after a step failed:
 
 ```console
-cd ~/Desktop/gh/smarter-sh/<repository> && git add -- <paths> && \
+cd ~/Desktop/gh/smarter-sh/<repository> && source venv/bin/activate && git add -- <paths> && \
 git commit --author="Claude <noreply@anthropic.com>" \
   -m "<type>(<scope>): <subject>" \
   -m "<body>" \
-  -m "Co-authored-by: Lawrence McDaniel <lpm0073@gmail.com>"
+  -m "Co-authored-by: Lawrence McDaniel <lpm0073@gmail.com>" && \
+git pull && git push
 ```
+
+- Check for `<repository>/venv/bin/activate` first. Where there is none, leave out `source venv/bin/activate`
+  (it would fail and stop the chain), and say which repositories have no venv.
+- With two commits in one block, chain them, and pull and push once, after the last.
+- You only write these commands. The user runs them, the push included.
 
 - Read each repository's diff: the same change made across many repositories can share a message, but a repository
   with something more (a script, a license, site content) gets its own message, or a second commit in its block.
