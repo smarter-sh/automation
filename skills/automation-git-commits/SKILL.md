@@ -33,6 +33,32 @@ git commit --author="Claude <noreply@anthropic.com>" \
 - Never write a CI skip instruction (`[skip ci]` and its variants) anywhere in the message, even to describe one.
 - When asked for the `git add` too, write it as a separate code block, listing the paths.
 
+## Several repositories at once
+
+When the user asks for the commits of every repository with changes (the checkouts next to this one, in
+`~/Desktop/gh/smarter-sh/`), find them read-only first:
+
+```bash
+cd ~/Desktop/gh/smarter-sh && for d in */; do [ -n "$(git -C "$d" status --porcelain 2>/dev/null)" ] && echo "$d"; done
+```
+
+Then write **one code block per repository**, ready to paste into the terminal as it is, with the `cd`, the `git add`
+and the `git commit` together, chained with `&&` so that nothing is committed in the wrong directory:
+
+```console
+cd ~/Desktop/gh/smarter-sh/<repository> && git add -- <paths> && \
+git commit --author="Claude <noreply@anthropic.com>" \
+  -m "<type>(<scope>): <subject>" \
+  -m "<body>" \
+  -m "Co-authored-by: Lawrence McDaniel <lpm0073@gmail.com>"
+```
+
+- Read each repository's diff: the same change made across many repositories can share a message, but a repository
+  with something more (a script, a license, site content) gets its own message, or a second commit in its block.
+- List the paths to add. Never add `.claude/settings.local.json`, `.env` or other local files: in a new `.claude/`
+  folder, add only `.claude/skills`.
+- Use the other repository's own commit conventions when its `skills/` has a git-commits skill.
+
 ## Subject line
 
 `<type>(<scope>): <subject>`, imperative, lower case, no trailing period, **72 characters or fewer** in total.
