@@ -3,7 +3,7 @@
 
 Usage::
 
-    python3 -E -s scripts/pod_log_loki.py --context <kube context> --namespace <namespace> \\
+    python3 -E -s scripts/pod_log/loki.py --context <kube context> --namespace <namespace> \\
         --log-dir <folder> [--since 25h]
 
 The pod log review (``.github/workflows/podLogReview.yml``) first runs smarter's
@@ -33,7 +33,7 @@ lines are in the same file, in order. MariaDB's pods are in ``mariadb/``, and a 
 a log too, though ``inventory/pods.txt`` does not list it.
 
 Alloy redacts email addresses, IP addresses, tokens, keys and passwords before Loki stores a line, and
-writes ``<email>``, ``<ip>`` or ``<redacted>`` in their place. ``pod_log_redact.py`` turns the first and
+writes ``<email>``, ``<ip>`` or ``<redacted>`` in their place. ``pod_log/redact.py`` turns the first and
 the last into its own placeholders, so that they are still reported as findings.
 
 Like every script that the workflow runs, it prints only counts and file names, never a log line: the
@@ -253,11 +253,13 @@ class Loki:
             one stream: its log holds every container's lines.
         :raises LokiError: If Loki cannot list them.
         """
-        selector = "{namespace=" + logql_string(namespace) + "}"
+        quoted_namespace = logql_string(namespace)
+        selector = "{namespace=" + quoted_namespace + "}"
         params = {"match[]": selector, "start": str(start), "end": str(end)}
         answer = self.get("/loki/api/v1/series", params)
+        series = answer.get("data") or []
         found: dict[str, Stream] = {}
-        for labels in answer.get("data") or []:
+        for labels in series:
             if not isinstance(labels, dict):
                 continue
             pod = labels.get("pod")
@@ -286,7 +288,7 @@ class Loki:
         :param end: The period's end, in Unix nanoseconds.
         :raises LokiError: If a page cannot be read.
         """
-        selector = "{namespace=" + logql_string(namespace) + ", pod=" + logql_string(stream.pod) + "}"
+        selector = _pod_selector(namespace, stream.pod)
         page_start = start
         seen_at_page_start: set[str] = set()
         while True:
@@ -299,24 +301,64 @@ class Loki:
             }
             answer = self.get("/loki/api/v1/query_range", params)
             page = page_lines(answer)
-            new_lines = []
-            for line in page:
-                if line[0] == page_start and line[1] in seen_at_page_start:
-                    continue
-                new_lines.append(line)
+            new_lines = _unseen_lines(page, page_start, seen_at_page_start)
             stream.lines.extend(new_lines)
             if len(stream.lines) >= MAX_LINES_PER_POD:
                 del stream.lines[MAX_LINES_PER_POD:]
                 stream.truncated = True
                 return
-            if len(page) < PAGE_SIZE or not new_lines:
+            is_last_page = len(page) < PAGE_SIZE
+            if is_last_page or not new_lines:
                 return
-            last_time = page[-1][0]
-            seen_at_page_start = set()
-            for line_time, text in page:
-                if line_time == last_time:
-                    seen_at_page_start.add(text)
+            last_time, _ = page[-1]
+            seen_at_page_start = _texts_at(page, last_time)
             page_start = last_time
+
+
+def _pod_selector(namespace: str, pod: str) -> str:
+    """
+    Build the LogQL selector of one pod's lines.
+
+    :param namespace: The environment's namespace.
+    :param pod: The pod's name.
+    :returns: E.g. ``{namespace="smarter-ubc-prod", pod="smarter-0"}``.
+    """
+    quoted_namespace = logql_string(namespace)
+    quoted_pod = logql_string(pod)
+    return "{namespace=" + quoted_namespace + ", pod=" + quoted_pod + "}"
+
+
+def _unseen_lines(page: list[tuple[int, str]], page_start: int, seen: set[str]) -> list[tuple[int, str]]:
+    """
+    Drop the lines of a page that the page before already read.
+
+    :param page: The page's lines, oldest first.
+    :param page_start: The time that the page starts at: the last line's time of the page before.
+    :param seen: The texts of the lines at ``page_start`` that the page before read.
+    :returns: The page's other lines, in order.
+    """
+    new_lines = []
+    for line_time, text in page:
+        already_read = line_time == page_start and text in seen
+        if already_read:
+            continue
+        new_lines.append((line_time, text))
+    return new_lines
+
+
+def _texts_at(page: list[tuple[int, str]], line_time: int) -> set[str]:
+    """
+    Collect the texts of a page's lines that have a given time.
+
+    :param page: The page's lines.
+    :param line_time: The time, in Unix nanoseconds.
+    :returns: The texts of the lines at that time.
+    """
+    texts = set()
+    for time_of_line, text in page:
+        if time_of_line == line_time:
+            texts.add(text)
+    return texts
 
 
 def stream_order(stream: Stream) -> tuple[str, str]:
@@ -341,17 +383,34 @@ def page_lines(answer: dict) -> list[tuple[int, str]]:
     :raises LokiError: If a line's time is not a number.
     """
     data = answer.get("data") or {}
+    results = data.get("result") or []
     lines = []
-    for stream in data.get("result") or []:
-        for value in stream.get("values") or []:
-            if len(value) < 2:
-                continue
-            try:
-                line_time = int(value[0])
-            except (TypeError, ValueError) as e:
-                raise LokiError("a line of Loki's answer has no time") from e
-            lines.append((line_time, str(value[1])))
+    for stream in results:
+        stream_lines = _result_lines(stream)
+        lines.extend(stream_lines)
     lines.sort(key=line_order)
+    return lines
+
+
+def _result_lines(stream: dict) -> list[tuple[int, str]]:
+    """
+    Read the lines of one stream of a ``query_range`` answer.
+
+    :param stream: One item of the answer's ``result``, with its ``values``.
+    :returns: Each line's time, in Unix nanoseconds, and its text, in Loki's order.
+    :raises LokiError: If a line's time is not a number.
+    """
+    values = stream.get("values") or []
+    lines = []
+    for value in values:
+        if len(value) < 2:
+            continue
+        try:
+            line_time = int(value[0])
+        except (TypeError, ValueError) as e:
+            raise LokiError("a line of Loki's answer has no time") from e
+        text = str(value[1])
+        lines.append((line_time, text))
     return lines
 
 
@@ -454,7 +513,8 @@ def write_logs(streams: list[Stream], folder: pathlib.Path) -> int:
         path = component_folder / f"{stream.pod}.log"
         with path.open("w", encoding="utf-8") as log:
             for line_time, text in stream.lines:
-                log.write(f"{timestamp(line_time)} {text}\n")
+                line_timestamp = timestamp(line_time)
+                log.write(f"{line_timestamp} {text}\n")
                 written += 1
     return written
 
@@ -472,7 +532,8 @@ def replace_logs(log_dir: pathlib.Path, loki_dir: pathlib.Path) -> None:
         if child.is_dir() and child.name != "inventory":
             shutil.rmtree(child)
     for child in loki_dir.iterdir():
-        shutil.move(str(child), str(log_dir / child.name))
+        target = log_dir / child.name
+        shutil.move(str(child), str(target))
 
 
 def write_source(log_dir: pathlib.Path, text: str) -> None:
@@ -484,7 +545,8 @@ def write_source(log_dir: pathlib.Path, text: str) -> None:
     """
     inventory = log_dir / "inventory"
     inventory.mkdir(parents=True, exist_ok=True)
-    (inventory / SOURCE_NAME).write_text(text, encoding="utf-8")
+    source_path = inventory / SOURCE_NAME
+    source_path.write_text(text, encoding="utf-8")
 
 
 def read_from_loki(loki: Loki, namespace: str, period: timedelta, loki_dir: pathlib.Path) -> str:
@@ -546,7 +608,8 @@ def run(context: str, namespace: str, log_dir: pathlib.Path, since: str) -> bool
         source = read_from_loki(loki, namespace, period, loki_dir)
     except LokiError as e:
         print(f"::warning::The logs were not read from Loki, so the review reads kubectl's: {e}")
-        write_source(log_dir, f"kubectl: the running pods' logs, from kubectl logs. Loki could not be read: {e}\n")
+        kubectl_source = f"kubectl: the running pods' logs, from kubectl logs. Loki could not be read: {e}\n"
+        write_source(log_dir, kubectl_source)
         shutil.rmtree(loki_dir, ignore_errors=True)
         return False
     finally:
@@ -555,7 +618,8 @@ def run(context: str, namespace: str, log_dir: pathlib.Path, since: str) -> bool
     replace_logs(log_dir, loki_dir)
     shutil.rmtree(loki_dir, ignore_errors=True)
     write_source(log_dir, source)
-    pods = len(list(log_dir.glob("*/*.log")))
+    pod_logs = list(log_dir.glob("*/*.log"))
+    pods = len(pod_logs)
     print(f"replaced the logs with Loki's: {pods} pod(s), {period} back")
     return True
 
@@ -574,7 +638,8 @@ def main() -> int:
     parser.add_argument("--since", default="", help="how far back to read, e.g. 25h; empty: all that Loki keeps")
     args = parser.parse_args()
     log_dir = pathlib.Path(args.log_dir)
-    if not (log_dir / "inventory").is_dir():
+    inventory = log_dir / "inventory"
+    if not inventory.is_dir():
         print(f"{log_dir} has no inventory: run download-logs.sh first.", file=sys.stderr)
         return 2
     try:

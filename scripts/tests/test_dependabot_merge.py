@@ -47,13 +47,24 @@ class FakeGitHub:
         if args[:3] == ("gh", "pr", "list"):
             return self.listed
         if args[:3] == ("gh", "pr", "view"):
-            answers = self.viewed.get(int(args[3]))
-            if isinstance(answers, list):
-                return answers.pop(0) if len(answers) > 1 else answers[0]
-            return answers or next(item for item in self.listed if item["number"] == int(args[3]))
+            return self.view(int(args[3]))
         if args[:2] == ("gh", "api"):
             return self.settings
         raise AssertionError(args)
+
+    def view(self, number):
+        """What gh pr view prints: the next of viewed's answers (the last one repeats), or else what gh pr list did."""
+        answers = self.viewed.get(number)
+        if isinstance(answers, list):
+            if len(answers) > 1:
+                return answers.pop(0)
+            return answers[0]
+        if answers:
+            return answers
+        for item in self.listed:
+            if item["number"] == number:
+                return item
+        raise AssertionError(number)
 
     def run(self, *args, check=True, input_text=None, strip=True):
         self.commands.append(args)
@@ -130,7 +141,8 @@ class TestProcess(unittest.TestCase):
         self.assertNotIn("--delete-branch", close)
         self.assertTrue(fake.ran("gh", "pr", "merge", "4", "--repo", "smarter-sh/a", "--squash", "--auto"))
         self.assertFalse(fake.ran("gh", "pr", "merge", "3"))
-        self.assertTrue(all("--admin" not in command for command in fake.commands))
+        for command in fake.commands:
+            self.assertNotIn("--admin", command)
 
     def test_sibling_conflict_is_left(self):
         fake = FakeGitHub([pr(1), pr(2)], viewed={2: pr(2, "CONFLICTING", "DIRTY")})
@@ -167,14 +179,11 @@ class TestProcess(unittest.TestCase):
 
     def test_process_all(self):
         repos = [{"name": "smarter-sh/a", "default_branch": "main"}, {"name": "smarter-sh/b", "default_branch": "main"}]
+        merged = [merge.Result("smarter-sh/a", 1, "t", "u", "alpha", "merged")]
         error = subprocess.CalledProcessError(1, ["gh"], stderr="HTTP 404")
         with (
             mock.patch.object(merge, "repositories", return_value=repos),
-            mock.patch.object(
-                merge,
-                "process_repository",
-                side_effect=[[merge.Result("smarter-sh/a", 1, "t", "u", "alpha", "merged")], error],
-            ),
+            mock.patch.object(merge, "process_repository", side_effect=[merged, error]),
         ):
             results = merge.process_all("smarter-sh", RUN_URL, False)
         self.assertEqual([result.action for result in results], ["merged", "error"])
@@ -210,18 +219,19 @@ class TestReport(unittest.TestCase):
     def test_main(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "results.json")
+            summary_path = str(Path(directory) / "s.md")
+            missing_path = str(Path(directory) / "missing.json")
             with mock.patch.object(merge, "process_all", return_value=self.results()):
                 self.assertEqual(merge.main(["run", "--output", path]), 0)
             with redirect_stdout(io.StringIO()):
-                self.assertEqual(
-                    merge.main(["report", "--results", path, "--summary", str(Path(directory) / "s.md")]), 0
-                )
-            failed = self.results() + [merge.Result("smarter-sh/c", 0, "", "u", "", "error", "HTTP 404")]
+                self.assertEqual(merge.main(["report", "--results", path, "--summary", summary_path]), 0)
+            failed = self.results()
+            failed.append(merge.Result("smarter-sh/c", 0, "", "u", "", "error", "HTTP 404"))
             merge.save(failed, path)
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(merge.main(["report", "--results", path]), 1)
             with mock.patch("sys.stderr", io.StringIO()):
-                self.assertEqual(merge.main(["report", "--results", str(Path(directory) / "missing.json")]), 1)
+                self.assertEqual(merge.main(["report", "--results", missing_path]), 1)
             error = subprocess.CalledProcessError(1, ["gh"], stderr="HTTP 401")
             with mock.patch.object(merge, "process_all", side_effect=error), mock.patch("sys.stderr", io.StringIO()):
                 self.assertEqual(merge.main(["run", "--output", path]), 1)

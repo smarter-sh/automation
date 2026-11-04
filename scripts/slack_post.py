@@ -38,16 +38,21 @@ def post(channel: str, text: str, token: str, unfurl: bool = False) -> dict:
     :returns: Slack's answer, with the message's ``channel`` and ``ts``.
     :raises RuntimeError: If Slack refused it, e.g. ``not_in_channel``.
     """
-    body = json.dumps({"channel": channel, "text": text, "unfurl_links": unfurl, "unfurl_media": unfurl}).encode()
+    payload = {"channel": channel, "text": text, "unfurl_links": unfurl, "unfurl_media": unfurl}
+    payload_text = json.dumps(payload)
+    body = payload_text.encode()
     request = urllib.request.Request(  # nosec B310: a fixed https url
         SLACK_POST_MESSAGE_URL,
         data=body,
         headers={"Content-Type": "application/json; charset=utf-8", "Authorization": f"Bearer {token}"},
     )
     with urllib.request.urlopen(request, timeout=30) as response:  # nosec B310
-        answer = json.loads(response.read().decode())
+        raw_answer = response.read()
+    answer_text = raw_answer.decode()
+    answer = json.loads(answer_text)
     if not answer.get("ok"):
-        raise RuntimeError(f"Slack refused the message: {answer.get('error', 'unknown error')}")
+        reason = answer.get("error", "unknown error")
+        raise RuntimeError(f"Slack refused the message: {reason}")
     return answer
 
 
@@ -57,7 +62,9 @@ def main(argv: list[str] | None = None) -> int:
     :param argv: Optional command-line arguments, excluding the program name.
     :returns: 0 if no post is needed or Slack accepts it; otherwise 1.
     """
-    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
+    module_doc = __doc__ or ""
+    description = module_doc.splitlines()[0]
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--channel", required=True, help="A channel name, e.g. smarter, or id.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)

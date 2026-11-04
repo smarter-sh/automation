@@ -8,7 +8,7 @@
 # GitHub release, then tests npm/PyPI installs or downloads the Go module.
 # Findings go to #general; package scripts are disabled during npm installs.
 #
-# The logic is in scripts/organization_health.py, whose tests are in scripts/tests.
+# The logic is in scripts/health/organization_health.py, whose tests are in scripts/tests.
 #
 # Secrets:
 #   PAT              a GitHub token with repository contents and organization
@@ -71,14 +71,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT }}
         run: |
-          python3 -E -s scripts/organization_health.py run packages \
+          python3 -E -s scripts/health/organization_health.py run packages \
             --results "$RUNNER_TEMP/results.json"
 
       - name: Summarize findings
         if: always()
         shell: bash
         run: |
-          python3 -E -s scripts/organization_health.py report \
+          python3 -E -s scripts/health/organization_health.py report \
             --results "$RUNNER_TEMP/results.json" --run-url "$RUN_URL" \
             --summary "$GITHUB_STEP_SUMMARY" --slack-output "$RUNNER_TEMP/slack.txt"
 

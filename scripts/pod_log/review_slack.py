@@ -5,7 +5,7 @@ This is the last step of ``.github/workflows/podLogReview.yml`` before its clean
 
 Usage::
 
-    python3 -E -s scripts/pod_log_review_slack.py <stream.jsonl> \\
+    python3 -E -s scripts/pod_log/review_slack.py <stream.jsonl> \\
         --channel smarter --title "Pod log review: prod" [--run-url URL] \\
         [--log-dir DIR] [--since 25h] [--dry-run]
 
@@ -20,7 +20,7 @@ instead.
   GitHub accepted the change, never from what Claude says it did.
 - **It wrote nothing, and was healthy.** Claude Code finished without an error, its final
   answer ends with the exact line ``Verdict: healthy`` (see
-  :attr:`pod_log_review_stream.ReviewResult.healthy`), and ``pod_log_redact.py`` redacted
+  :attr:`pod_log.review_stream.ReviewResult.healthy`), and ``pod_log/redact.py`` redacted
   nothing from the logs: Smarter's logs must not hold credentials or personal data, so a
   redaction is a finding whatever Claude concluded. The message is a clean bill of health, whose facts
   (pods, restarts, release) come from the kubectl inventory in ``--log-dir``. The verdict is the
@@ -44,9 +44,16 @@ import argparse
 import os
 import re
 import sys
+from pathlib import Path
 
-from pod_log_redact import read_report
-from pod_log_review_stream import (
+# Run by its path, a script has only its own folder (scripts/pod_log) on sys.path. Add scripts/, so
+# that the imports below find the pod_log package and slack_post.
+SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent)
+if SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, SCRIPTS_DIR)
+
+from pod_log.redact import read_report  # noqa: E402
+from pod_log.review_stream import (  # noqa: E402
     WRITE_TOOLS,
     JsonObject,
     PodInventory,
@@ -55,7 +62,7 @@ from pod_log_review_stream import (
     final_result,
     tool_name,
 )
-from slack_post import post
+from slack_post import post  # noqa: E402
 
 DESCRIPTION = "Tell a Slack channel what an unattended Claude Code review wrote to GitHub, or that all was well."
 """The command line's description."""
@@ -66,7 +73,7 @@ ACTION_LABELS = {
     "close_issue": ":white_check_mark: Closed",
     "create_pull_request": ":twisted_rightwards_arrows: Proposed",
 }
-"""How the message introduces each of the write tools, :data:`pod_log_review_stream.WRITE_TOOLS`."""
+"""How the message introduces each of the write tools, :data:`pod_log.review_stream.WRITE_TOOLS`."""
 
 GITHUB_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/(?:issues|pull)/\d+(?:#issuecomment-\d+)?")
 """A link to an issue, a pull request or a comment, as the MCP server's write tools return it."""
@@ -111,6 +118,20 @@ def escape(text: str) -> str:
     return escaped.replace(">", "&gt;")
 
 
+def write_tool_name(block: JsonObject) -> str | None:
+    """
+    Return the write tool that a ``tool_use`` block calls, if it calls one.
+
+    :param block: A content block of type ``tool_use``.
+    :returns: The tool's name, one of :data:`pod_log.review_stream.WRITE_TOOLS`, or None for any other tool.
+    """
+    full_name = str(block.get("name", ""))
+    name = tool_name(full_name)
+    if name not in WRITE_TOOLS:
+        return None
+    return name
+
+
 def actions(path: str) -> list[str]:
     """
     Return one line of Slack mrkdwn for each GitHub write that succeeded, in the order they ran.
@@ -125,15 +146,20 @@ def actions(path: str) -> list[str]:
     lines: list[str] = []
     for event in events(path):
         for block in content_blocks(event):
-            if block.get("type") == "tool_use":
-                name = tool_name(str(block.get("name", "")))
-                if name in WRITE_TOOLS:
-                    calls[str(block.get("id"))] = name
-            elif block.get("type") == "tool_result" and str(block.get("tool_use_id")) in calls:
-                name = calls.pop(str(block.get("tool_use_id")))
-                line = format_action(name, block)
-                if line:
-                    lines.append(line)
+            block_type = block.get("type")
+            if block_type == "tool_use":
+                name = write_tool_name(block)
+                if name:
+                    call_id = str(block.get("id"))
+                    calls[call_id] = name
+                continue
+            call_id = str(block.get("tool_use_id"))
+            if block_type != "tool_result" or call_id not in calls:
+                continue
+            name = calls.pop(call_id)
+            line = format_action(name, block)
+            if line:
+                lines.append(line)
     return lines
 
 
@@ -141,7 +167,7 @@ def format_action(name: str, block: JsonObject) -> str | None:
     """
     Return one write as a line of Slack mrkdwn: what was done, and a link to it.
 
-    :param name: The tool's name, one of :data:`pod_log_review_stream.WRITE_TOOLS`.
+    :param name: The tool's name, one of :data:`pod_log.review_stream.WRITE_TOOLS`.
     :param block: The tool's ``tool_result`` block. Its text is e.g.
         ``Opened issue #42 in smarter-sh/smarter by x: title``, then the link on the next line.
     :returns: The line, e.g. ``:new: Opened issue #42 in smarter-sh/smarter: title <url|view>``, or
@@ -151,13 +177,16 @@ def format_action(name: str, block: JsonObject) -> str | None:
     link = GITHUB_URL.search(text)
     if block.get("is_error") or not link:
         return None
-    first = text.strip().splitlines()[0]
+    stripped = text.strip()
+    first = stripped.splitlines()[0]
     # the tool's own verb is replaced by the label's, and its author dropped.
     first = re.sub(r"^(Opened( draft)?|Commented on|Closed)\s+", "", first)
     first = re.sub(r" by [\w-]+(?=[:,.])", "", first)
     if len(first) > MAX_LINE:
         first = first[: MAX_LINE - 3] + "..."
-    return f"{ACTION_LABELS[name]} {escape(first)} <{link.group(0)}|view>"
+    label = ACTION_LABELS[name]
+    url = link.group(0)
+    return f"{label} {escape(first)} <{url}|view>"
 
 
 def footer(run_url: str) -> str:
@@ -180,8 +209,12 @@ def actions_message(title: str, lines: list[str], run_url: str) -> str:
     :returns: The message, in Slack mrkdwn.
     """
     shown = lines[:MAX_ACTIONS]
-    more = [f"…and {len(lines) - len(shown)} more"] if len(lines) > len(shown) else []
-    return "\n".join([f"*{escape(title)}*", *shown, *more, footer(run_url)])
+    hidden = len(lines) - len(shown)
+    message_lines = [f"*{escape(title)}*", *shown]
+    if hidden:
+        message_lines.append(f"…and {hidden} more")
+    message_lines.append(footer(run_url))
+    return "\n".join(message_lines)
 
 
 def clean_bill_of_health(title: str, inventory: PodInventory, since: str, run_url: str) -> str:
@@ -191,7 +224,7 @@ def clean_bill_of_health(title: str, inventory: PodInventory, since: str, run_ur
     Each fact that the inventory lacks is left out, rather than shown as unknown.
 
     :param title: The heading, e.g. ``Pod log review of ubc.smarter.sh``.
-    :param inventory: The reviewed pods, from :meth:`pod_log_review_stream.PodInventory.read`.
+    :param inventory: The reviewed pods, from :meth:`pod_log.review_stream.PodInventory.read`.
     :param since: How far back each log reaches, e.g. ``25h``, or an empty string for each
         container's whole log.
     :param run_url: The workflow run's url, or an empty string.
@@ -211,7 +244,8 @@ def clean_bill_of_health(title: str, inventory: PodInventory, since: str, run_ur
     elif inventory.restarts:
         lines.append(f":repeat: {inventory.restarts} restart(s), and Claude judged them harmless")
     if inventory.releases:
-        lines.append(f":package: Release {', '.join(escape(tag) for tag in inventory.releases)}")
+        tags = ", ".join(escape(tag) for tag in inventory.releases)
+        lines.append(f":package: Release {tags}")
     lines.append(":coffee: No new issues, nothing to close. Enjoy your day!")
     lines.append(footer(run_url))
     return "\n".join(lines)
@@ -227,23 +261,26 @@ def message(stream: str, title: str, run_url: str, log_dir: str, since: str) -> 
     :param log_dir: The folder of ``download-logs.sh``, for a clean bill of health.
     :param since: How far back each log reaches, e.g. ``25h``, or an empty string.
     :returns: The message, in Slack mrkdwn, or None if the run wrote nothing and wasn't healthy,
-        or if ``pod_log_redact.py`` redacted anything from the logs in ``log_dir``.
+        or if ``pod_log/redact.py`` redacted anything from the logs in ``log_dir``.
     """
     lines = actions(stream)
     if lines:
         return actions_message(title, lines, run_url)
     result = final_result(stream)
-    if result is not None and result.healthy and not read_report(log_dir).get("total"):
-        return clean_bill_of_health(title, PodInventory.read(log_dir), since, run_url)
-    return None
+    if result is None or not result.healthy:
+        return None
+    report = read_report(log_dir)
+    if report.get("total"):
+        return None
+    inventory = PodInventory.read(log_dir)
+    return clean_bill_of_health(title, inventory, since, run_url)
 
 
-def main() -> int:
+def parse_arguments() -> argparse.Namespace:
     """
-    Post the run's message, if it has one.
+    Read the command line.
 
-    :returns: 0 if the message was posted, or there was nothing to post, or no token; 1 if the
-        stream doesn't exist or Slack refused the message.
+    :returns: The stream's path, and the options: channel, title, run url, log folder, since and dry run.
     """
     parser = argparse.ArgumentParser(description=DESCRIPTION)
     parser.add_argument("stream", help="the run's stream-json output")
@@ -253,14 +290,24 @@ def main() -> int:
     parser.add_argument("--log-dir", default="", help="the folder of download-logs.sh, for a clean bill of health")
     parser.add_argument("--since", default="", help="how far back each log reaches, e.g. 25h")
     parser.add_argument("--dry-run", action="store_true", help="print the message instead of posting it")
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main() -> int:
+    """
+    Post the run's message, if it has one.
+
+    :returns: 0 if the message was posted, or there was nothing to post, or no token; 1 if the
+        stream doesn't exist or Slack refused the message.
+    """
+    args = parse_arguments()
     if not os.path.exists(args.stream):
-        print(f"pod_log_review_slack.py: {args.stream} does not exist", file=sys.stderr)
+        print(f"pod_log/review_slack.py: {args.stream} does not exist", file=sys.stderr)
         return 1
     text = message(args.stream, args.title, args.run_url, args.log_dir, args.since)
     if text is None:
         print(
-            "pod_log_review_slack.py: nothing was written to GitHub, and the run was not healthy, so nothing is posted"
+            "pod_log/review_slack.py: nothing was written to GitHub, and the run was not healthy, so nothing is posted"
         )
         return 0
     if args.dry_run:
@@ -268,14 +315,14 @@ def main() -> int:
         return 0
     token = os.environ.get("SLACK_BOT_TOKEN", "")
     if not token:
-        print("pod_log_review_slack.py: SLACK_BOT_TOKEN is not set, so nothing is posted")
+        print("pod_log/review_slack.py: SLACK_BOT_TOKEN is not set, so nothing is posted")
         return 0
     try:
         post(args.channel, text, token)
     except (OSError, RuntimeError, ValueError) as e:
-        print(f"pod_log_review_slack.py: {e}", file=sys.stderr)
+        print(f"pod_log/review_slack.py: {e}", file=sys.stderr)
         return 1
-    print(f"pod_log_review_slack.py: posted to {args.channel}")
+    print(f"pod_log/review_slack.py: posted to {args.channel}")
     return 0
 
 

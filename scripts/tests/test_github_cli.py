@@ -49,6 +49,69 @@ class TestErrorLine(unittest.TestCase):
         self.assertIn("exit status 2", github_cli.error_line(error))
 
 
+class TestHttpStatus(unittest.TestCase):
+    """Http_status() keeps the status only."""
+
+    def test_status(self):
+        error = subprocess.CalledProcessError(1, ["gh"], stderr="HTTP 403: Resource not accessible (smarter-sh/a)")
+        self.assertEqual(github_cli.http_status(error), "403")
+
+    def test_no_status(self):
+        error = subprocess.CalledProcessError(1, ["gh"], stderr="connection reset")
+        self.assertEqual(github_cli.http_status(error), "unknown")
+
+
+class TestApiObject(unittest.TestCase):
+    """Api_object() returns an object, {} for no content, and refuses anything else."""
+
+    def test_object(self):
+        with mock.patch.object(github_cli, "run_json", return_value={"a": 1}) as fake:
+            self.assertEqual(github_cli.api_object("repos/smarter-sh/a"), {"a": 1})
+        self.assertEqual(fake.call_args.args, ("gh", "api", "repos/smarter-sh/a"))
+
+    def test_no_content(self):
+        with mock.patch.object(github_cli, "run_json", return_value=None):
+            self.assertEqual(github_cli.api_object("x"), {})
+
+    def test_not_an_object(self):
+        with mock.patch.object(github_cli, "run_json", return_value=[]):
+            with self.assertRaises(ValueError):
+                github_cli.api_object("x")
+
+
+class TestApiPages(unittest.TestCase):
+    """Api_pages() reads pages until a short one, from a list or from a key of an object."""
+
+    def test_follows_pages(self):
+        full_page = [{"name": str(index)} for index in range(github_cli.PAGE_SIZE)]
+        last_page = [{"name": "last"}]
+        with mock.patch.object(github_cli, "run_json", side_effect=[full_page, last_page]) as fake:
+            items = github_cli.api_pages("orgs/smarter-sh/repos?type=all")
+        self.assertEqual(len(items), github_cli.PAGE_SIZE + 1)
+        endpoints = [call.args[2] for call in fake.call_args_list]
+        self.assertEqual(
+            endpoints,
+            [
+                "orgs/smarter-sh/repos?type=all&per_page=100&page=1",
+                "orgs/smarter-sh/repos?type=all&per_page=100&page=2",
+            ],
+        )
+
+    def test_key(self):
+        answer = {"total_count": 1, "secrets": [{"name": "PAT"}]}
+        with mock.patch.object(github_cli, "run_json", return_value=answer) as fake:
+            items = github_cli.api_pages("orgs/smarter-sh/actions/secrets", "secrets")
+        self.assertEqual(items, [{"name": "PAT"}])
+        self.assertEqual(fake.call_args.args[2], "orgs/smarter-sh/actions/secrets?per_page=100&page=1")
+
+    def test_bad_page(self):
+        for answer in ({"secrets": "x"}, ["x"], None):
+            with self.subTest(answer=answer):
+                with mock.patch.object(github_cli, "run_json", return_value=answer):
+                    with self.assertRaises(ValueError):
+                        github_cli.api_pages("x", "secrets")
+
+
 class TestRepositories(unittest.TestCase):
     """Repositories() lists the organization's repositories, sorted, with a default branch."""
 

@@ -71,16 +71,21 @@ class TestParsePorcelain(unittest.TestCase):
     """Git status --porcelain output becomes a sorted list of paths."""
 
     def test_paths(self):
-        text = " M tests/data/contracts/openapi.json\n?? tests/data/sam/New.schema.json\nD  tests/data/sam/Old.example.json\n"
-        self.assertEqual(
-            sync.parse_porcelain(text),
-            ["tests/data/contracts/openapi.json", "tests/data/sam/New.schema.json", "tests/data/sam/Old.example.json"],
+        text = (
+            " M tests/data/contracts/openapi.json\n"
+            "?? tests/data/sam/New.schema.json\n"
+            "D  tests/data/sam/Old.example.json\n"
         )
+        expected = [
+            "tests/data/contracts/openapi.json",
+            "tests/data/sam/New.schema.json",
+            "tests/data/sam/Old.example.json",
+        ]
+        self.assertEqual(sync.parse_porcelain(text), expected)
 
     def test_rename_and_quotes(self):
-        self.assertEqual(
-            sync.parse_porcelain('R  a.json -> b.json\n?? "with space.json"\n\nx\n'), ["b.json", "with space.json"]
-        )
+        text = 'R  a.json -> b.json\n?? "with space.json"\n\nx\n'
+        self.assertEqual(sync.parse_porcelain(text), ["b.json", "with space.json"])
 
     def test_changed_files_reads_git_status(self):
         with mock.patch.object(sync, "run", return_value=" M sam/llmclient.go") as run:
@@ -103,8 +108,10 @@ class TestResult(unittest.TestCase):
         self.assertFalse(result().out_of_sync)
 
     def test_a_source_record_alone_is_not_a_change(self):
-        self.assertEqual(result(changed=["testdata/contracts/SOURCE"]).verdict, "current")
-        self.assertTrue(result(changed=["testdata/contracts/SOURCE", "testdata/contracts/openapi.json"]).out_of_sync)
+        source_only = result(changed=["testdata/contracts/SOURCE"])
+        self.assertEqual(source_only.verdict, "current")
+        with_openapi = result(changed=["testdata/contracts/SOURCE", "testdata/contracts/openapi.json"])
+        self.assertTrue(with_openapi.out_of_sync)
 
     def test_outdated(self):
         self.assertEqual(result(changed=["tests/data/contracts/openapi.json"]).verdict, "outdated")
@@ -153,14 +160,15 @@ class TestText(unittest.TestCase):
         self.assertIn("compatible", compatible)
         self.assertIn("`a.json`", compatible)
         self.assertIn("make sam-models SMARTER_REF=v0.40.4", compatible)
-        self.assertIn(
-            "tests fail after the sync", sync.issue_body(result(changed=["a.json"], tests="failure"), RUN_URL)
-        )
-        self.assertIn("already fail", sync.issue_body(result(changed=["a.json"], baseline="failure"), RUN_URL))
+        broken = sync.issue_body(result(changed=["a.json"], tests="failure"), RUN_URL)
+        self.assertIn("tests fail after the sync", broken)
+        failing = sync.issue_body(result(changed=["a.json"], baseline="failure"), RUN_URL)
+        self.assertIn("already fail", failing)
         self.assertIn("v0.40.4", sync.issue_title(result()))
 
     def test_file_list_is_cut(self):
-        text = sync.file_list([f"f{i}" for i in range(sync.MAX_FILES + 3)])
+        paths = [f"f{i}" for i in range(sync.MAX_FILES + 3)]
+        text = sync.file_list(paths)
         self.assertIn("and 3 more", text)
         self.assertEqual(sync.file_list([]), "- (none)")
 
@@ -168,7 +176,8 @@ class TestText(unittest.TestCase):
         body = sync.pull_request_body(result(changed=["a.json"], tests="failure"), RUN_URL, "7")
         self.assertIn("Closes #7", body)
         self.assertIn("Draft", body)
-        self.assertNotIn("Closes", sync.pull_request_body(result(changed=["a.json"]), RUN_URL, ""))
+        without_issue = sync.pull_request_body(result(changed=["a.json"]), RUN_URL, "")
+        self.assertNotIn("Closes", without_issue)
 
     def test_outcome(self):
         self.assertEqual(sync.outcome("success"), "pass")
@@ -210,7 +219,8 @@ class TestPublish(unittest.TestCase):
     def test_current_with_nothing_open(self):
         fake = FakeGitHub()
         self.publish(result(), fake)
-        self.assertEqual(fake.ran("gh", "pr", "close") + fake.ran("gh", "issue", "close"), [])
+        self.assertEqual(fake.ran("gh", "pr", "close"), [])
+        self.assertEqual(fake.ran("gh", "issue", "close"), [])
 
     def test_outdated_opens_an_issue_and_a_pull_request(self):
         fake = FakeGitHub()
@@ -218,15 +228,16 @@ class TestPublish(unittest.TestCase):
         self.assertEqual(published.issue_url, "https://github.com/smarter-sh/smarter-python/issues/7")
         self.assertEqual(published.pull_request_url, "https://github.com/smarter-sh/smarter-python/pull/8")
         self.assertEqual(len(fake.ran("gh", "label", "create", sync.LABEL)), 1)
-        self.assertEqual(
-            fake.ran("git", "push"), [("git", "push", "--force", "--quiet", "origin", f"HEAD:refs/heads/{sync.BRANCH}")]
-        )
-        commit = fake.inputs[fake.commands.index(fake.ran("git", "commit")[0])]
-        self.assertTrue(commit.startswith("fix(contracts): sync with smarter v0.40.4\n\n"))
+        push = ("git", "push", "--force", "--quiet", "origin", f"HEAD:refs/heads/{sync.BRANCH}")
+        self.assertEqual(fake.ran("git", "push"), [push])
+        commit = fake.ran("git", "commit")[0]
+        commit_message = fake.inputs[fake.commands.index(commit)]
+        self.assertTrue(commit_message.startswith("fix(contracts): sync with smarter v0.40.4\n\n"))
         create = fake.ran("gh", "pr", "create")[0]
         self.assertIn("alpha", create)
         self.assertNotIn("--draft", create)
-        self.assertIn("Closes #7", fake.inputs[fake.commands.index(create)])
+        pull_request_body = fake.inputs[fake.commands.index(create)]
+        self.assertIn("Closes #7", pull_request_body)
 
     def test_broken_opens_a_draft(self):
         fake = FakeGitHub()
@@ -236,12 +247,13 @@ class TestPublish(unittest.TestCase):
     def test_a_later_run_updates_the_open_issue_and_pull_request(self):
         fake = FakeGitHub(open_issue={"number": 3, "url": "u3"}, open_pr={"number": 4, "url": "u4"})
         published = self.publish(result(changed=["a.json"], tests="failure"), fake)
-        self.assertEqual((published.issue_url, published.pull_request_url), ("u3", "u4"))
-        self.assertEqual(fake.ran("gh", "issue", "create") + fake.ran("gh", "pr", "create"), [])
+        self.assertEqual(published.issue_url, "u3")
+        self.assertEqual(published.pull_request_url, "u4")
+        self.assertEqual(fake.ran("gh", "issue", "create"), [])
+        self.assertEqual(fake.ran("gh", "pr", "create"), [])
         self.assertEqual(len(fake.ran("gh", "issue", "edit", "3")), 1)
-        self.assertEqual(
-            fake.ran("gh", "pr", "ready"), [("gh", "pr", "ready", "4", "--repo", "smarter-sh/smarter-python")]
-        )
+        ready = ("gh", "pr", "ready", "4", "--repo", "smarter-sh/smarter-python")
+        self.assertEqual(fake.ran("gh", "pr", "ready"), [ready])
 
     def test_a_fixed_pull_request_leaves_draft(self):
         fake = FakeGitHub(open_issue={"number": 3, "url": "u3"}, open_pr={"number": 4, "url": "u4"})
@@ -253,7 +265,8 @@ class TestReport(unittest.TestCase):
     """The job summary and the Slack message."""
 
     def test_clean_bill_of_health(self):
-        message = sync.slack_message([result(), result(repository="smarter-sh/smarter-cli")], "v0.40.4", RUN_URL)
+        results = [result(), result(repository="smarter-sh/smarter-cli")]
+        message = sync.slack_message(results, "v0.40.4", RUN_URL)
         self.assertIn("clean bill of health", message)
         self.assertIn("smarter-python, smarter-cli", message)
 
@@ -276,7 +289,8 @@ class TestReport(unittest.TestCase):
         self.assertIn("(no results)", sync.summary_markdown([], "v0.40.4", RUN_URL))
 
     def test_summary(self):
-        text = sync.summary_markdown([result(changed=["a.json"], issue_url="https://i", error="x")], "v0.40.4", RUN_URL)
+        results = [result(changed=["a.json"], issue_url="https://i", error="x")]
+        text = sync.summary_markdown(results, "v0.40.4", RUN_URL)
         self.assertIn(
             "| smarter-sh/smarter-python | out of date, compatible (x) | pass | pass | 1 | [issue](https://i) |  |",
             text,
@@ -304,7 +318,9 @@ class TestMain(unittest.TestCase):
             )  # fmt: skip
             self.assertEqual(code, 0)
             saved = sync.Result.load(path)
-        self.assertEqual((saved.changed, saved.shipped, saved.verdict), (["sam/x.go"], ["sam"], "broken"))
+        self.assertEqual(saved.changed, ["sam/x.go"])
+        self.assertEqual(saved.shipped, ["sam"])
+        self.assertEqual(saved.verdict, "broken")
 
     def test_publish_records_a_failure(self):
         with tempfile.TemporaryDirectory() as directory:

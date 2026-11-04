@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that each platform integration's latest release loads the latest Smarter Chat, and propose the update where it doesn't.
+"""Check that each integration's latest release loads the latest Smarter Chat, and propose the update if not.
 
 This is the core of ``.github/workflows/embedVersionSync.yml``, the weekly Embed Version Sync
 workflow. Smarter Chat's embed script is published to npm as ``@smarter.sh/ui-chat``. Five
@@ -49,10 +49,11 @@ import os
 import re
 import subprocess  # nosec B404: only for CalledProcessError
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from github_cli import error_line, run
+from result_files import load_result, load_result_folder, save_result
 
 PACKAGE = "@smarter.sh/ui-chat"
 """The npm package whose embed script the integrations load."""
@@ -147,9 +148,7 @@ VERDICT_TEXT = {
 @dataclass
 class Result:  # pylint: disable=too-many-instance-attributes
     """
-    One repository's check: the embed script's version in its latest release, in ``--base``, and.
-
-    after the update.
+    One repository's check: the embed script's version in its latest release, in ``--base``, and after the update.
 
     **Verdicts** (:attr:`verdict`):
 
@@ -185,11 +184,12 @@ class Result:  # pylint: disable=too-many-instance-attributes
 
         :returns: ``"error"``, ``"current"``, ``"unreleased"``, or ``"outdated"``.
         """
-        if self.error or not self.updated or any(pin != self.version for pin in self.updated):
+        update_worked = _all_at_version(self.updated, self.version)
+        if self.error or not update_worked:
             return "error"
-        if self.released and all(pin == self.version for pin in self.released):
+        if _all_at_version(self.released, self.version):
             return "current"
-        if self.base and all(pin == self.version for pin in self.base):
+        if _all_at_version(self.base, self.version):
             return "unreleased"
         return "outdated"
 
@@ -199,9 +199,7 @@ class Result:  # pylint: disable=too-many-instance-attributes
 
         :returns: The unique released pin versions, or ``"none"`` when there are none.
         """
-        unique_versions = set(self.released)
-        sorted_versions = sorted(unique_versions)
-        return ", ".join(sorted_versions) or "none"
+        return _versions_text(self.released)
 
     @classmethod
     def load(cls, path: str | Path) -> "Result":
@@ -213,9 +211,7 @@ class Result:  # pylint: disable=too-many-instance-attributes
         :param path: The result's JSON file.
         :returns: The result.
         """
-        text = Path(path).read_text(encoding="utf-8")
-        data = json.loads(text)
-        return cls(**{key: value for key, value in data.items() if key in cls.__dataclass_fields__})
+        return load_result(cls, path)
 
     def save(self, path: str | Path) -> None:
         """
@@ -223,7 +219,42 @@ class Result:  # pylint: disable=too-many-instance-attributes
 
         :param path: The file to write.
         """
-        Path(path).write_text(json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8")
+        save_result(self, path)
+
+
+def _all_at_version(versions: list[str], version: str) -> bool:
+    """
+    Tell whether every pin is at a version.
+
+    :param versions: The pins' versions.
+    :param version: The version they should be at.
+    :returns: True when there is at least one pin, and every one is at ``version``.
+    """
+    if not versions:
+        return False
+    return all(pin == version for pin in versions)
+
+
+def _versions_text(versions: list[str]) -> str:
+    """
+    Write the pins' versions for the report, each one once.
+
+    :param versions: The pins' versions.
+    :returns: The unique versions, sorted and joined with commas, or ``"none"`` when there are none.
+    """
+    unique_versions = set(versions)
+    sorted_versions = sorted(unique_versions)
+    return ", ".join(sorted_versions) or "none"
+
+
+def _short_name(result: Result) -> str:
+    """
+    Name a result's repository without its owner.
+
+    :param result: The repository's result.
+    :returns: e.g. ``smarter-drupal`` for ``smarter-sh/smarter-drupal``.
+    """
+    return result.repository.rsplit("/", 1)[-1]
 
 
 def pins_of(repository: str) -> tuple[Pin, ...]:
@@ -263,9 +294,9 @@ def set_pins(repository: str, version: str, root: Path = Path(".")) -> list[str]
 
 def latest_release_tag(release_branch: str) -> str:
     """
-    Find the repository's latest stable release: the newest tag on its release branch without a.
+    Find the repository's latest stable release: the newest tag on its release branch without a prerelease suffix.
 
-    prerelease suffix (``v0.2.0``, not ``v0.2.0-alpha.2``).
+    That is ``v0.2.0``, not ``v0.2.0-alpha.2``.
 
     :param release_branch: The branch that semantic-release publishes stable releases from, e.g.
         ``main``. The checkout has it as ``origin/<branch>``.
@@ -287,10 +318,22 @@ def read_pins(repository: str, ref: str = "") -> list[str]:
         if ref:
             text = run("git", "show", f"{ref}:{pin.path}", check=False)
         else:
-            file = Path(pin.path)
-            text = file.read_text(encoding="utf-8") if file.is_file() else ""
+            text = _read_working_file(pin.path)
         versions.append(pin.read(text))
     return versions
+
+
+def _read_working_file(path: str) -> str:
+    """
+    Read a file of the current directory's checkout.
+
+    :param path: The file, relative to the checkout's root.
+    :returns: Its contents, or empty when it doesn't exist.
+    """
+    file = Path(path)
+    if not file.is_file():
+        return ""
+    return file.read_text(encoding="utf-8")
 
 
 def changed_files() -> list[str]:
@@ -300,9 +343,9 @@ def changed_files() -> list[str]:
     :returns: The changed paths, sorted. Files that git ignores, e.g. WordPress's downloaded
         ``smarter-chat/assets/embed.js``, are not among them.
     """
-    status = run("git", "status", "--porcelain", strip=False)
+    porcelain = run("git", "status", "--porcelain", strip=False)
     paths = set()
-    for line in status.splitlines():
+    for line in porcelain.splitlines():
         if line:
             path = line[3:].strip('"')
             paths.add(path)
@@ -320,21 +363,40 @@ def status(repository: str, version: str, release_branch: str) -> Result:
         :attr:`Result.error`.
     """
     tag = latest_release_tag(release_branch)
+    released = []
+    if tag:
+        released = read_pins(repository, tag)
     result = Result(
         repository=repository,
         version=version,
         release_tag=tag,
-        released=read_pins(repository, tag) if tag else [],
+        released=released,
         base=read_pins(repository, "HEAD"),
         updated=read_pins(repository),
         changed=changed_files(),
     )
-    missing = [pin.path for pin, value in zip(pins_of(repository), result.updated) if not value]
-    if missing:
-        result.error = f"no version found in {', '.join(missing)}"
-    elif result.updated and any(pin != version for pin in result.updated):
-        result.error = f"the update left the pins at {', '.join(result.updated)}"
+    result.error = _update_error(result)
     return result
+
+
+def _update_error(result: Result) -> str:
+    """
+    Say what is wrong with the pins after the update.
+
+    :param result: The repository's result, with :attr:`Result.updated` read.
+    :returns: Which pins have no version, or which versions the update left them at, or empty when every pin is at
+        :attr:`Result.version`.
+    """
+    missing = []
+    for pin, value in zip(pins_of(result.repository), result.updated):
+        if not value:
+            missing.append(pin.path)
+    if missing:
+        return f"no version found in {', '.join(missing)}"
+    left_behind = any(pin != result.version for pin in result.updated)
+    if left_behind:
+        return f"the update left the pins at {', '.join(result.updated)}"
+    return ""
 
 
 def commit_subject(result: Result) -> str:
@@ -357,11 +419,13 @@ def pull_request_body(result: Result, run_url: str) -> str:
     :param run_url: The workflow run's url, which the body links.
     :returns: The body, in GitHub Markdown.
     """
-    released = f"{result.release_tag} loads {result.shipped}" if result.release_tag else "There is no release yet"
-    files = "\n".join(f"- `{path}`" for path in result.changed) or "- (none)"
-    base_versions = set(result.base)
-    sorted_base_versions = sorted(base_versions)
-    base_version_text = ", ".join(sorted_base_versions) or "none"
+    if result.release_tag:
+        released = f"{result.release_tag} loads {result.shipped}"
+    else:
+        released = "There is no release yet"
+    file_lines = [f"- `{path}`" for path in result.changed]
+    files = "\n".join(file_lines) or "- (none)"
+    base_version_text = _versions_text(result.base)
     lines = [
         f"Updates the embed script that this repository loads to the latest `{PACKAGE}` on npm, "
         f"[{result.version}](https://www.npmjs.com/package/{PACKAGE}/v/{result.version}).",
@@ -393,7 +457,63 @@ def find_pull_request(repository: str) -> dict | None:
         "--json", "number,url", "--limit", "1",
     )  # fmt: skip
     items = json.loads(text or "[]")
-    return items[0] if items else None
+    if not items:
+        return None
+    return items[0]
+
+
+def _close_pull_request(result: Result, pull_request: dict, base: str) -> None:
+    """
+    Close an earlier run's pull request, and delete its branch, because ``base`` is already current.
+
+    :param result: The repository's result.
+    :param pull_request: The open pull request, as :func:`find_pull_request` found it.
+    :param base: The branch that the pull request merges into, e.g. ``alpha``.
+    """
+    number = str(pull_request["number"])
+    comment = f"{base} already loads {PACKAGE} {result.version}. Closed by the Embed Version Sync workflow."
+    run("gh", "pr", "close", number, "--repo", result.repository, "--delete-branch", "--comment", comment)
+
+
+def _push_update(result: Result, run_url: str) -> None:
+    """
+    Commit the checkout's update on :data:`BRANCH`, as the Actions bot, and force-push it.
+
+    :param result: The repository's result.
+    :param run_url: The workflow run's url, which the commit message links.
+    """
+    run("git", "config", "user.name", BOT_NAME)
+    run("git", "config", "user.email", BOT_EMAIL)
+    run("git", "checkout", "-B", BRANCH)
+    run("git", "add", "--all")
+    subject = commit_subject(result)
+    message = f"{subject}\n\nOpened by The Smarter Project's Embed Version Sync workflow: {run_url}"
+    run("git", "commit", "--quiet", "--file", "-", input_text=message)
+    run("git", "push", "--force", "--quiet", "origin", f"HEAD:refs/heads/{BRANCH}")
+
+
+def _open_or_update_pull_request(result: Result, pull_request: dict | None, base: str, run_url: str) -> str:
+    """
+    Open the update's pull request, or give an earlier run's open one the newest title and body.
+
+    :param result: The repository's result.
+    :param pull_request: The open pull request, as :func:`find_pull_request` found it, or None.
+    :param base: The branch that the pull request merges into, e.g. ``alpha``.
+    :param run_url: The workflow run's url, which the body links.
+    :returns: The pull request's url.
+    """
+    title = commit_subject(result)
+    body = pull_request_body(result, run_url)
+    if pull_request:
+        run(
+            "gh", "pr", "edit", str(pull_request["number"]), "--repo", result.repository,
+            "--title", title, "--body-file", "-", input_text=body,
+        )  # fmt: skip
+        return pull_request["url"]
+    return run(
+        "gh", "pr", "create", "--repo", result.repository, "--base", base, "--head", BRANCH,
+        "--title", title, "--body-file", "-", input_text=body,
+    )  # fmt: skip
 
 
 def publish(result: Result, base: str, run_url: str, dry_run: bool) -> Result:
@@ -429,33 +549,31 @@ def publish(result: Result, base: str, run_url: str, dry_run: bool) -> Result:
     pull_request = find_pull_request(result.repository)
     if verdict != "outdated":
         if pull_request:
-            run(
-                "gh", "pr", "close", str(pull_request["number"]), "--repo", result.repository, "--delete-branch",
-                "--comment", f"{base} already loads {PACKAGE} {result.version}. Closed by the Embed Version Sync workflow.",
-            )  # fmt: skip
+            _close_pull_request(result, pull_request, base)
         print(f"{result.repository}: {verdict}.")
         return result
-    run("git", "config", "user.name", BOT_NAME)
-    run("git", "config", "user.email", BOT_EMAIL)
-    run("git", "checkout", "-B", BRANCH)
-    run("git", "add", "--all")
-    message = f"{commit_subject(result)}\n\nOpened by The Smarter Project's Embed Version Sync workflow: {run_url}"
-    run("git", "commit", "--quiet", "--file", "-", input_text=message)
-    run("git", "push", "--force", "--quiet", "origin", f"HEAD:refs/heads/{BRANCH}")
-    title, body = commit_subject(result), pull_request_body(result, run_url)
-    if pull_request:
-        run(
-            "gh", "pr", "edit", str(pull_request["number"]), "--repo", result.repository,
-            "--title", title, "--body-file", "-", input_text=body,
-        )  # fmt: skip
-        result.pull_request_url = pull_request["url"]
-    else:
-        result.pull_request_url = run(
-            "gh", "pr", "create", "--repo", result.repository, "--base", base, "--head", BRANCH,
-            "--title", title, "--body-file", "-", input_text=body,
-        )  # fmt: skip
+    _push_update(result, run_url)
+    result.pull_request_url = _open_or_update_pull_request(result, pull_request, base, run_url)
     print(f"{result.repository}: outdated. Pull request {result.pull_request_url}")
     return result
+
+
+def _summary_row(result: Result) -> str:
+    """
+    Write one repository's row of the run's summary table.
+
+    :param result: The repository's result.
+    :returns: The row, in GitHub Markdown.
+    """
+    text, _ = VERDICT_TEXT[result.verdict]
+    error = f" ({result.error})" if result.error else ""
+    pull_request = f"[pull request]({result.pull_request_url})" if result.pull_request_url else ""
+    release_tag = result.release_tag or "none"
+    base_versions = _versions_text(result.base)
+    return (
+        f"| {result.repository} | {text}{error} | {release_tag} | {result.shipped} "
+        f"| {base_versions} | {pull_request} |"
+    )
 
 
 def summary_markdown(results: list[Result], version: str, run_url: str) -> str:
@@ -474,17 +592,26 @@ def summary_markdown(results: list[Result], version: str, run_url: str) -> str:
         "| --- | --- | --- | --- | --- | --- |",
     ]
     for result in results:
-        text, _ = VERDICT_TEXT[result.verdict]
-        error = f" ({result.error})" if result.error else ""
-        pull_request = f"[pull request]({result.pull_request_url})" if result.pull_request_url else ""
-        lines.append(
-            f"| {result.repository} | {text}{error} | {result.release_tag or 'none'} | {result.shipped} "
-            f"| {', '.join(sorted(set(result.base))) or 'none'} | {pull_request} |"
-        )
+        lines.append(_summary_row(result))
     if not results:
         lines.append("| (no results) | | | | | |")
     lines += ["", f"[The run]({run_url})"]
     return "\n".join(lines) + "\n"
+
+
+def _slack_line(result: Result) -> str:
+    """
+    Write the Slack line of a repository that needs attention.
+
+    :param result: The repository's result.
+    :returns: The line, in Slack's mrkdwn.
+    """
+    text, emoji = VERDICT_TEXT[result.verdict]
+    if result.error:
+        text = f"{text}; {result.error}"
+    link = f" (<{result.pull_request_url}|pull request>)" if result.pull_request_url else ""
+    release_tag = result.release_tag or "(none)"
+    return f"{emoji} {result.repository}: {text}. Its release {release_tag} loads {result.shipped}{link}"
 
 
 def slack_message(results: list[Result], version: str, run_url: str) -> str:
@@ -501,24 +628,17 @@ def slack_message(results: list[Result], version: str, run_url: str) -> str:
     """
     current = [result for result in results if result.verdict == "current"]
     if results and len(current) == len(results):
-        names = ", ".join(result.repository.rsplit("/", 1)[-1] for result in results)
+        names = ", ".join(_short_name(result) for result in results)
         return (
             f":white_check_mark: *Smarter Chat embed: clean bill of health.* The latest release of every integration "
             f"loads {PACKAGE} {version}: {names}. <{run_url}|The run>"
         )
     lines = [f"*Smarter Chat embed version sync with {PACKAGE} {version}*"]
     for result in results:
-        if result in current:
-            continue
-        text, emoji = VERDICT_TEXT[result.verdict]
-        if result.error:
-            text = f"{text}; {result.error}"
-        link = f" (<{result.pull_request_url}|pull request>)" if result.pull_request_url else ""
-        lines.append(
-            f"{emoji} {result.repository}: {text}. Its release {result.release_tag or '(none)'} loads {result.shipped}{link}"
-        )
+        if result not in current:
+            lines.append(_slack_line(result))
     if current:
-        names = ", ".join(result.repository.rsplit("/", 1)[-1] for result in current)
+        names = ", ".join(_short_name(result) for result in current)
         lines.append(f":white_check_mark: {len(current)} more current: {names}")
     if not results:
         lines.append(":warning: No repository reported a result.")
@@ -535,13 +655,7 @@ def load_results(directory: str) -> list[Result]:
     :param directory: The folder, searched recursively for ``*.json`` files.
     :returns: The results, sorted by repository.
     """
-    results = []
-    for path in sorted(Path(directory).rglob("*.json")):
-        try:
-            results.append(Result.load(path))
-        except (OSError, ValueError, TypeError):
-            continue
-    return sorted(results, key=lambda result: result.repository)
+    return load_result_folder(Result, directory)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -551,7 +665,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     :param argv: The arguments, without the program's name. None reads ``sys.argv``.
     :returns: The parsed arguments, with the subcommand's name in ``command``.
     """
-    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
+    module_doc = __doc__ or ""
+    description = module_doc.splitlines()[0]
+    parser = argparse.ArgumentParser(description=description)
     commands = parser.add_subparsers(dest="command", required=True)
 
     pin = commands.add_parser("pin", help="Rewrite every pin of the checkout to a version.")
@@ -578,6 +694,80 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _run_pin(args: argparse.Namespace) -> int:
+    """
+    Run ``pin``: rewrite every pin of the checkout to ``--version``.
+
+    :param args: The parsed arguments.
+    :returns: The exit code: 0, or 1 when the repository is unknown or a file couldn't be rewritten.
+    """
+    try:
+        written = set_pins(args.repository, args.version)
+    except (KeyError, OSError) as error:
+        print(f"embed_version_sync.py: {error}", file=sys.stderr)
+        return 1
+    files = ", ".join(written) or "no file (already there)"
+    print(f"{args.repository}: {PACKAGE} {args.version} in {files}.")
+    return 0
+
+
+def _run_status(args: argparse.Namespace) -> int:
+    """
+    Run ``status``: write the checkout's result to ``--output``.
+
+    An unknown repository's result is saved with its error.
+
+    :param args: The parsed arguments.
+    :returns: The exit code: 0.
+    """
+    try:
+        result = status(args.repository, args.version, args.release_branch)
+    except KeyError as error:
+        message = str(error).strip("'\"")
+        result = Result(repository=args.repository, version=args.version, error=message)
+    result.save(args.output)
+    release_tag = result.release_tag or "(none)"
+    print(f"{result.repository}: {result.verdict}. Its release {release_tag} loads {result.shipped}.")
+    return 0
+
+
+def _run_publish(args: argparse.Namespace) -> int:
+    """
+    Run ``publish``: act on the result in ``--result``, and save it back with the pull request's url or the error.
+
+    :param args: The parsed arguments.
+    :returns: The exit code: 0, or 1 when ``git`` or ``gh`` failed.
+    """
+    result = Result.load(args.result)
+    try:
+        publish(result, args.base, args.run_url, args.dry_run)
+    except subprocess.CalledProcessError as error:
+        result.error = f"publishing failed: {error_line(error)}"
+        print(f"{result.repository}: {result.error}", file=sys.stderr)
+        result.save(args.result)
+        return 1
+    result.save(args.result)
+    return 0
+
+
+def _run_report(args: argparse.Namespace) -> int:
+    """
+    Run ``report``: append the summary to ``--summary``, and print the Slack message.
+
+    :param args: The parsed arguments.
+    :returns: The exit code: 0, or 1 when there is no result, or a repository's verdict is ``error``.
+    """
+    results = load_results(args.results)
+    if args.summary:
+        with open(args.summary, "a", encoding="utf-8") as summary:
+            summary.write(summary_markdown(results, args.version, args.run_url))
+    print(slack_message(results, args.version, args.run_url))
+    any_error = any(result.verdict == "error" for result in results)
+    if not results or any_error:
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """
     Run one subcommand.
@@ -588,40 +778,12 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = parse_args(argv)
     if args.command == "pin":
-        try:
-            written = set_pins(args.repository, args.version)
-        except (KeyError, OSError) as error:
-            print(f"embed_version_sync.py: {error}", file=sys.stderr)
-            return 1
-        print(f"{args.repository}: {PACKAGE} {args.version} in {', '.join(written) or 'no file (already there)'}.")
-        return 0
+        return _run_pin(args)
     if args.command == "status":
-        try:
-            result = status(args.repository, args.version, args.release_branch)
-        except KeyError as error:
-            result = Result(repository=args.repository, version=args.version, error=str(error).strip("'\""))
-        result.save(args.output)
-        print(
-            f"{result.repository}: {result.verdict}. Its release {result.release_tag or '(none)'} loads {result.shipped}."
-        )
-        return 0
+        return _run_status(args)
     if args.command == "publish":
-        result = Result.load(args.result)
-        try:
-            publish(result, args.base, args.run_url, args.dry_run)
-        except subprocess.CalledProcessError as error:
-            result.error = f"publishing failed: {error_line(error)}"
-            print(f"{result.repository}: {result.error}", file=sys.stderr)
-            result.save(args.result)
-            return 1
-        result.save(args.result)
-        return 0
-    results = load_results(args.results)
-    if args.summary:
-        with open(args.summary, "a", encoding="utf-8") as summary:
-            summary.write(summary_markdown(results, args.version, args.run_url))
-    print(slack_message(results, args.version, args.run_url))
-    return 1 if not results or any(result.verdict == "error" for result in results) else 0
+        return _run_publish(args)
+    return _run_report(args)
 
 
 if __name__ == "__main__":

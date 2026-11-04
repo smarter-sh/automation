@@ -23,6 +23,8 @@ REPOSITORIES = [
     {"name": "smarter-sh/b", "default_branch": "main"},
     {"name": "smarter-sh/c", "default_branch": "main"},
     {"name": "smarter-sh/d", "default_branch": "main"},
+    {"name": "smarter-sh/e", "default_branch": "main"},
+    {"name": "smarter-sh/f", "default_branch": "main"},
 ]
 
 WORKFLOWS = {
@@ -33,6 +35,12 @@ WORKFLOWS = {
     ],
     "smarter-sh/c": [{"id": 4, "path": ".github/workflows/test.yml", "state": "disabled_manually"}],
     "smarter-sh/d": [{"id": 5, "path": ".github/workflows/build.yml", "state": "active"}],
+    "smarter-sh/e": [{"id": 6, "path": ".github/workflows/ci.yml", "state": "active"}],
+    # the first of WORKFLOW_FILES wins
+    "smarter-sh/f": [
+        {"id": 7, "path": ".github/workflows/ci.yml", "state": "active"},
+        {"id": 8, "path": ".github/workflows/tests.yml", "state": "active"},
+    ],
 }
 
 
@@ -49,7 +57,8 @@ class FakeApi:
     def __call__(self, *args: str):
         self.calls.append(args)
         path = next(arg for arg in args if arg.startswith("repos/"))
-        repository = "/".join(path.split("/")[1:3])
+        parts = path.split("/")
+        repository = f"{parts[1]}/{parts[2]}"
         if path.endswith("/actions/workflows"):
             return {"workflows": WORKFLOWS[repository]}
         if path.endswith("/dispatches"):
@@ -85,16 +94,23 @@ class TestStart(unittest.TestCase):
     def test_dispatch_with_details(self):
         api = FakeApi(dispatch_answer=details)
         results = self.start(api, ref="alpha")
-        self.assertEqual([result.repository for result in results], ["smarter-sh/a", "smarter-sh/b", "smarter-sh/c"])
+        repositories = [result.repository for result in results]
+        expected = ["smarter-sh/a", "smarter-sh/b", "smarter-sh/c", "smarter-sh/d", "smarter-sh/e", "smarter-sh/f"]
+        self.assertEqual(repositories, expected)
         self.assertEqual(results[0].status, "queued")
         self.assertEqual(results[0].run_id, 10)
         self.assertEqual(results[1].workflow, ".github/workflows/tests.yml")
         self.assertEqual(results[0].ref, "alpha")
         self.assertEqual(results[2].status, "not_started")
         self.assertIn("disabled manually", results[2].reason)
+        self.assertEqual(results[3].status, tests.NO_WORKFLOW)
+        self.assertFalse(results[3].failed)
+        self.assertEqual(results[4].workflow, ".github/workflows/ci.yml")
+        self.assertEqual(results[5].workflow, ".github/workflows/tests.yml")
         dispatches = [call for call in api.calls if call[-1] == "return_run_details=true"]
-        self.assertEqual(len(dispatches), 2)
+        self.assertEqual(len(dispatches), 4)
         self.assertIn("ref=alpha", dispatches[0])
+        self.assertIn("repos/smarter-sh/f/actions/workflows/8/dispatches", dispatches[3])
 
     def test_dispatch_finds_run(self):
         results = self.start(FakeApi())
@@ -110,7 +126,9 @@ class TestStart(unittest.TestCase):
     def test_dry_run(self):
         api = FakeApi()
         results = self.start(api, dry_run=True)
-        self.assertEqual([result.status for result in results], ["would_start", "would_start", "not_started"])
+        statuses = [result.status for result in results]
+        expected = ["would_start", "would_start", "not_started", tests.NO_WORKFLOW, "would_start", "would_start"]
+        self.assertEqual(statuses, expected)
         self.assertFalse([call for call in api.calls if "POST" in call])
 
     def test_run_never_appears(self):
@@ -208,29 +226,48 @@ class TestReport(unittest.TestCase):
         self.assertIn("(dry run): 1 of 2 test suites would start", message)
         self.assertIn("disabled", message)
 
+    def test_untested(self):
+        results = [
+            tests.Result("smarter-sh/a", "t", "main", status="success"),
+            tests.Result("smarter-sh/b", "", "main", status=tests.NO_WORKFLOW),
+            tests.Result("smarter-sh/c", "", "main", status=tests.NO_WORKFLOW),
+        ]
+        self.assertIn("all 1 test suites passed", tests.slack_message(results, RUN_URL))
+        summary = tests.summary_markdown(results, RUN_URL)
+        self.assertIn("1 of 1 passed", summary)
+        self.assertNotIn("| smarter-sh/b |", summary)
+        self.assertIn("Not tested, 2 repositories without a test workflow", summary)
+        self.assertIn("ci.yml", summary)
+        self.assertIn(": smarter-sh/b, smarter-sh/c", summary)
+
     def test_none(self):
         self.assertIn("No repository", tests.slack_message([], RUN_URL))
         self.assertIn("no repository has a test workflow", tests.summary_markdown([], RUN_URL))
+        untested = [tests.Result("smarter-sh/a", "", "main", status=tests.NO_WORKFLOW)]
+        self.assertIn("No repository", tests.slack_message(untested, RUN_URL))
+        self.assertIn("no repository has a test workflow", tests.summary_markdown(untested, RUN_URL))
 
     def test_main(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "results.json")
+            summary_path = str(Path(directory) / "s.md")
+            missing_path = str(Path(directory) / "missing.json")
+            passed = [tests.Result("smarter-sh/a", "t", "main", status="success")]
             with (
-                mock.patch.object(
-                    tests, "start_all", return_value=[tests.Result("smarter-sh/a", "t", "main", status="success")]
-                ),
+                mock.patch.object(tests, "start_all", return_value=passed),
                 mock.patch.object(tests, "wait_all"),
             ):
                 self.assertEqual(tests.main(["run", "--output", path]), 0)
             with redirect_stdout(io.StringIO()):
-                self.assertEqual(
-                    tests.main(["report", "--results", path, "--summary", str(Path(directory) / "s.md")]), 0
-                )
+                self.assertEqual(tests.main(["report", "--results", path, "--summary", summary_path]), 0)
             tests.save([tests.Result("smarter-sh/a", "t", "main", status="failure")], path)
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(tests.main(["report", "--results", path]), 1)
             with redirect_stdout(io.StringIO()):
-                self.assertEqual(tests.main(["report", "--results", str(Path(directory) / "missing.json")]), 1)
+                self.assertEqual(tests.main(["report", "--results", missing_path]), 1)
+            tests.save([tests.Result("smarter-sh/a", "", "main", status=tests.NO_WORKFLOW)], path)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(tests.main(["report", "--results", path]), 1)
             error = subprocess.CalledProcessError(1, ["gh"], stderr="HTTP 401")
             with mock.patch.object(tests, "start_all", side_effect=error), mock.patch("sys.stderr", io.StringIO()):
                 self.assertEqual(tests.main(["run", "--output", path]), 1)

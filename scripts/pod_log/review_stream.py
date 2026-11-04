@@ -7,9 +7,9 @@ initialization, each assistant turn and its tool calls, each tool result, and fi
 reads that stream, and the log folder that ``download-logs.sh`` wrote, for the workflow's two
 scripts:
 
-- ``pod_log_review.py`` decides from :func:`final_result` and :func:`write_attempts` whether a failed
+- ``pod_log/review.py`` decides from :func:`final_result` and :func:`write_attempts` whether a failed
   run may be retried, and writes the final answer to the run's page;
-- ``pod_log_review_slack.py`` lists the GitHub writes that succeeded, or, on a clean run, posts the facts of
+- ``pod_log/review_slack.py`` lists the GitHub writes that succeeded, or, on a clean run, posts the facts of
   :class:`PodInventory`.
 
 Every reader tolerates a damaged stream: a line that isn't a JSON object, such as the last line of
@@ -18,8 +18,8 @@ which anyone can write into, so nothing here prints any of it.
 
 Like every script in ``scripts/``, it uses only the standard library, because the runner has no
 virtual environment. The workflow runs the scripts with ``python3 -E -s``, which ignores
-``PYTHONPATH`` and the user's site-packages but, unlike ``-I``, keeps the script's own folder on
-``sys.path``, so that they import this module by name.
+``PYTHONPATH`` and the user's site-packages. The scripts that import this module put ``scripts/``
+on ``sys.path`` themselves, so that they import it as ``pod_log.review_stream``.
 
 It uses only Python's standard library, which comes with every Python install:
 
@@ -40,7 +40,7 @@ import os
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import TypeVar
+from typing import TypeVar, cast
 
 T = TypeVar("T")
 
@@ -51,7 +51,10 @@ WRITE_TOOLS = ("create_issue", "comment_on_issue", "close_issue", "create_pull_r
 """The Smarter Project MCP server's tools that write to GitHub, without their ``mcp__<server>__`` prefix."""
 
 HEALTHY_VERDICT = "verdict: healthy"
-"""The last line of the final answer of a run that found nothing to fix, as ``.github/prompts/pod-log-review.md`` asks for it."""
+"""The last line of the final answer of a run that found nothing to fix.
+
+``.github/prompts/pod-log-review.md`` asks for it.
+"""
 
 IMAGE_TAG = re.compile(r"^[\w.+-]{1,64}$")
 """An image tag that is safe to show in a message: no spaces, markup or other punctuation."""
@@ -71,7 +74,8 @@ def typed(value: object, kind: type[T] | tuple[type[T], ...]) -> T | None:
         return None
     if isinstance(value, bool) and kind is not bool:
         return None
-    return value
+    # The checks above prove the type, but mypy can't narrow isinstance() with a tuple of type[T].
+    return cast(T, value)
 
 
 @dataclass(frozen=True)
@@ -126,7 +130,11 @@ class ReviewResult:
         :returns: Whether the API status is 429 or in the 500–599 range.
         """
         status = self.api_error_status
-        return status is not None and (status == 429 or 500 <= status <= 599)
+        if status is None:
+            return False
+        is_rate_limit = status == 429
+        is_server_error = 500 <= status <= 599
+        return is_rate_limit or is_server_error
 
     def describe(self) -> str:
         """
@@ -139,9 +147,12 @@ class ReviewResult:
         cost = "?" if self.total_cost_usd is None else f"{self.total_cost_usd:.2f}"
         text = f"turns: {turns}, cost: ${cost}"
         if self.is_error:
+            subtype = self.subtype or "?"
+            terminal_reason = self.terminal_reason or "?"
+            api_error_status = self.api_error_status or "none"
             text += (
-                f", failed: subtype {self.subtype or '?'}, terminal_reason {self.terminal_reason or '?'}, "
-                f"api_error_status {self.api_error_status or 'none'}"
+                f", failed: subtype {subtype}, terminal_reason {terminal_reason}, "
+                f"api_error_status {api_error_status}"
             )
         return text
 
@@ -163,7 +174,10 @@ class ReviewResult:
             cleaned = line.strip()
             if cleaned:
                 lines.append(cleaned)
-        return bool(lines) and lines[-1].strip("*_` ").lower() == HEALTHY_VERDICT
+        if not lines:
+            return False
+        verdict = lines[-1].strip("*_` ")
+        return verdict.lower() == HEALTHY_VERDICT
 
 
 @dataclass
@@ -197,7 +211,9 @@ class PodInventory:
         if not log_dir or not os.path.isdir(log_dir):
             return cls()
         pods = pods_by_deployment(log_dir)
-        names = {pod for deployment_pods in pods.values() for pod in deployment_pods}
+        names: set[str] = set()
+        for deployment_pods in pods.values():
+            names.update(deployment_pods)
         pod_counts = {deployment: len(deployment_pods) for deployment, deployment_pods in pods.items()}
         pods_path = os.path.join(log_dir, "inventory", "pods.txt")
         images_path = os.path.join(log_dir, "inventory", "images.txt")
@@ -263,9 +279,13 @@ def total_restarts(path: str, pod_names: set[str]) -> int | None:
         return None
     restarts = 0
     for row in rows:
-        if len(row) <= 3 or row[0] not in pod_names or not row[3].isdigit():
+        if len(row) <= 3:
             continue
-        restarts += int(row[3])
+        pod_name = row[0]
+        restarts_column = row[3]
+        if pod_name not in pod_names or not restarts_column.isdigit():
+            continue
+        restarts += int(restarts_column)
     return restarts
 
 
@@ -279,20 +299,37 @@ def running_releases(path: str) -> list[str]:
     :param path: ``inventory/images.txt``.
     :returns: The tags, each once, in order, or an empty list if the file can't be read.
     """
+    rows = read_rows(path)
+    if rows is None:
+        return []
     tags: list[str] = []
-    for row in read_rows(path) or []:
-        if len(row) != 3:
-            continue
-        replicas = row[1]
-        if not replicas.isdigit() or int(replicas) == 0:
-            continue
-        image = row[2]
-        if ":" not in image:
-            continue
-        tag = image.rpartition(":")[2]
-        if IMAGE_TAG.match(tag) and tag not in tags:
+    for row in rows:
+        tag = release_tag(row)
+        if tag and tag not in tags:
             tags.append(tag)
     return tags
+
+
+def release_tag(row: list[str]) -> str | None:
+    """
+    Return the image tag of one ReplicaSet line of ``inventory/images.txt``, if it has replicas.
+
+    :param row: The line's columns: ``<created> <replicas> <image>``.
+    :returns: The tag, or None for a section heading, a ReplicaSet with 0 replicas, an image
+        without a tag, or a tag that isn't safe to show (see :data:`IMAGE_TAG`).
+    """
+    if len(row) != 3:
+        return None
+    replicas = row[1]
+    if not replicas.isdigit() or int(replicas) == 0:
+        return None
+    image = row[2]
+    if ":" not in image:
+        return None
+    tag = image.rpartition(":")[2]
+    if not IMAGE_TAG.match(tag):
+        return None
+    return tag
 
 
 def tool_name(name: str) -> str:
@@ -333,7 +370,9 @@ def content_blocks(event: JsonObject) -> list[JsonObject]:
         without them, such as ``system`` or ``result``.
     """
     message = event.get("message")
-    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(message, dict):
+        return []
+    content = message.get("content")
     if not isinstance(content, list):
         return []
     return [block for block in content if isinstance(block, dict)]
@@ -351,7 +390,9 @@ def final_result(path: str) -> ReviewResult | None:
     for event in events(path):
         if event.get("type") == "result":
             last = event
-    return ReviewResult.from_event(last) if last is not None else None
+    if last is None:
+        return None
+    return ReviewResult.from_event(last)
 
 
 def write_attempts(path: str) -> int:
@@ -369,7 +410,8 @@ def write_attempts(path: str) -> int:
         for block in content_blocks(event):
             if block.get("type") != "tool_use":
                 continue
-            name = tool_name(str(block.get("name", "")))
+            full_name = str(block.get("name", ""))
+            name = tool_name(full_name)
             if name in WRITE_TOOLS:
                 attempts += 1
     return attempts

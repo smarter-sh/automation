@@ -21,7 +21,9 @@ import embed_version_sync as sync
 RUN_URL = "https://github.com/smarter-sh/automation/actions/runs/1"
 
 DRUPAL_FILES = {
-    "smarter_chat.libraries.yml": "embed:\n  js:\n    https://cdn.jsdelivr.net/npm/@smarter.sh/ui-chat@0.9.0/dist/embed.js:\n",
+    "smarter_chat.libraries.yml": (
+        "embed:\n  js:\n    https://cdn.jsdelivr.net/npm/@smarter.sh/ui-chat@0.9.0/dist/embed.js:\n"
+    ),
     "src/EmbedConfig.php": "<?php\nclass EmbedConfig {\n  public const EMBED_VERSION = '0.9.0';\n}\n",
 }
 
@@ -85,10 +87,12 @@ class TestPins(unittest.TestCase):
         for repository, texts in samples.items():
             for pin, text in zip(sync.PINS[repository], texts):
                 self.assertRegex(pin.read(text), r"^0\.(9\.0|36\.10)$", repository)
-                self.assertEqual(pin.read(pin.write(text, "0.39.0")), "0.39.0", repository)
+                rewritten = pin.write(text, "0.39.0")
+                self.assertEqual(pin.read(rewritten), "0.39.0", repository)
 
     def test_read_missing(self):
-        self.assertEqual(sync.PINS["smarter-sh/smarter-shopify"][0].read("nothing here"), "")
+        shopify_pin = sync.PINS["smarter-sh/smarter-shopify"][0]
+        self.assertEqual(shopify_pin.read("nothing here"), "")
 
     def test_unknown_repository(self):
         with self.assertRaises(KeyError):
@@ -98,13 +102,17 @@ class TestPins(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for path, text in DRUPAL_FILES.items():
-                (root / path).parent.mkdir(parents=True, exist_ok=True)
-                (root / path).write_text(text)
+                file = root / path
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text(text)
             written = sync.set_pins("smarter-sh/smarter-drupal", "0.39.0", root)
-            self.assertEqual(written, list(DRUPAL_FILES))
-            self.assertIn("ui-chat@0.39.0/dist", (root / "smarter_chat.libraries.yml").read_text())
-            self.assertIn("EMBED_VERSION = '0.39.0'", (root / "src/EmbedConfig.php").read_text())
-            self.assertEqual(sync.set_pins("smarter-sh/smarter-drupal", "0.39.0", root), [])
+            libraries = (root / "smarter_chat.libraries.yml").read_text()
+            embed_config = (root / "src/EmbedConfig.php").read_text()
+            written_again = sync.set_pins("smarter-sh/smarter-drupal", "0.39.0", root)
+        self.assertEqual(written, list(DRUPAL_FILES))
+        self.assertIn("ui-chat@0.39.0/dist", libraries)
+        self.assertIn("EMBED_VERSION = '0.39.0'", embed_config)
+        self.assertEqual(written_again, [])
 
 
 class TestVerdict(unittest.TestCase):
@@ -114,7 +122,8 @@ class TestVerdict(unittest.TestCase):
         self.assertEqual(result().verdict, "outdated")
 
     def test_current(self):
-        self.assertEqual(result(released=["0.39.0", "0.39.0"], base=["0.39.0", "0.39.0"]).verdict, "current")
+        current = result(released=["0.39.0", "0.39.0"], base=["0.39.0", "0.39.0"])
+        self.assertEqual(current.verdict, "current")
 
     def test_unreleased(self):
         self.assertEqual(result(base=["0.39.0", "0.39.0"]).verdict, "unreleased")
@@ -142,7 +151,8 @@ class TestStatus(unittest.TestCase):
             if args[:2] == ("git", "describe"):
                 return "v0.1.0"
             if args[:2] == ("git", "show"):
-                return DRUPAL_FILES[args[2].split(":", 1)[1]]
+                _, path = args[2].split(":", 1)
+                return DRUPAL_FILES[path]
             if args[:2] == ("git", "status"):
                 return " M smarter_chat.libraries.yml\n M src/EmbedConfig.php\n"
             return ""
@@ -152,8 +162,9 @@ class TestStatus(unittest.TestCase):
             os.chdir(directory)
             try:
                 for path, text in DRUPAL_FILES.items():
-                    Path(path).parent.mkdir(parents=True, exist_ok=True)
-                    Path(path).write_text(text)
+                    file = Path(path)
+                    file.parent.mkdir(parents=True, exist_ok=True)
+                    file.write_text(text)
                 sync.set_pins("smarter-sh/smarter-drupal", "0.39.0")
                 found = sync.status("smarter-sh/smarter-drupal", "0.39.0", "main")
                 Path("src/EmbedConfig.php").write_text("nothing")
@@ -231,7 +242,8 @@ class TestReport(unittest.TestCase):
 
     def test_clean(self):
         current = [result(released=["0.39.0", "0.39.0"], base=["0.39.0", "0.39.0"])]
-        self.assertIn("clean bill of health", sync.slack_message(current, "0.39.0", RUN_URL))
+        message = sync.slack_message(current, "0.39.0", RUN_URL)
+        self.assertIn("clean bill of health", message)
 
     def test_attention(self):
         items = [
@@ -239,12 +251,15 @@ class TestReport(unittest.TestCase):
             result(repository="smarter-sh/smarter-shopify", released=["0.39.0"], base=["0.39.0"], updated=["0.39.0"]),
         ]
         message = sync.slack_message(items, "0.39.0", RUN_URL)
+        summary = sync.summary_markdown(items, "0.39.0", RUN_URL)
+        empty_message = sync.slack_message([], "0.39.0", RUN_URL)
+        empty_summary = sync.summary_markdown([], "0.39.0", RUN_URL)
         self.assertIn("smarter-sh/smarter-drupal: out of date", message)
         self.assertIn("<https://x/9|pull request>", message)
         self.assertIn("1 more current: smarter-shopify", message)
-        self.assertIn("| smarter-sh/smarter-drupal |", sync.summary_markdown(items, "0.39.0", RUN_URL))
-        self.assertIn("No repository", sync.slack_message([], "0.39.0", RUN_URL))
-        self.assertIn("(no results)", sync.summary_markdown([], "0.39.0", RUN_URL))
+        self.assertIn("| smarter-sh/smarter-drupal |", summary)
+        self.assertIn("No repository", empty_message)
+        self.assertIn("(no results)", empty_summary)
 
 
 class TestMain(unittest.TestCase):
@@ -252,18 +267,21 @@ class TestMain(unittest.TestCase):
 
     def test_report_exit_codes(self):
         with tempfile.TemporaryDirectory() as directory:
-            result().save(Path(directory) / "a.json")
-            (Path(directory) / "junk.json").write_text("not json")
-            summary = Path(directory) / "summary.md"
+            folder = Path(directory)
+            result().save(folder / "a.json")
+            (folder / "junk.json").write_text("not json")
+            summary = folder / "summary.md"
             with redirect_stdout(io.StringIO()):
                 code = sync.main(["report", "--results", directory, "--version", "0.39.0", "--summary", str(summary)])
             self.assertEqual(code, 0)
             self.assertIn("smarter-drupal", summary.read_text())
-            result(repository="smarter-sh/smarter-shopify", error="x").save(Path(directory) / "b.json")
+            result(repository="smarter-sh/smarter-shopify", error="x").save(folder / "b.json")
             with redirect_stdout(io.StringIO()):
-                self.assertEqual(sync.main(["report", "--results", directory, "--version", "0.39.0"]), 1)
+                code_with_error = sync.main(["report", "--results", directory, "--version", "0.39.0"])
+            self.assertEqual(code_with_error, 1)
         with tempfile.TemporaryDirectory() as empty, redirect_stdout(io.StringIO()):
-            self.assertEqual(sync.main(["report", "--results", empty, "--version", "0.39.0"]), 1)
+            code_without_results = sync.main(["report", "--results", empty, "--version", "0.39.0"])
+        self.assertEqual(code_without_results, 1)
 
     def test_publish_failure_is_saved(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -277,22 +295,25 @@ class TestMain(unittest.TestCase):
                 mock.patch("sys.stderr", io.StringIO()),
             ):
                 code = sync.main(["publish", "--result", str(path)])
-            self.assertEqual(code, 1)
-            self.assertEqual(sync.Result.load(path).error, "publishing failed: HTTP 403: Forbidden")
+            saved = sync.Result.load(path)
+        self.assertEqual(code, 1)
+        self.assertEqual(saved.error, "publishing failed: HTTP 403: Forbidden")
 
     def test_status_unknown_repository(self):
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()):
             path = Path(directory) / "r.json"
-            self.assertEqual(
-                sync.main(["status", "--repository", "smarter-sh/nope", "--version", "1.0.0", "--output", str(path)]), 0
-            )
-            self.assertIn("no entry in PINS", sync.Result.load(path).error)
+            code = sync.main(["status", "--repository", "smarter-sh/nope", "--version", "1.0.0", "--output", str(path)])
+            saved = sync.Result.load(path)
+        self.assertEqual(code, 0)
+        self.assertIn("no entry in PINS", saved.error)
 
     def test_pin(self):
         with redirect_stdout(io.StringIO()), mock.patch("sys.stderr", io.StringIO()):
-            self.assertEqual(sync.main(["pin", "--repository", "smarter-sh/nope", "--version", "1.0.0"]), 1)
+            unknown_code = sync.main(["pin", "--repository", "smarter-sh/nope", "--version", "1.0.0"])
         with mock.patch.object(sync, "set_pins", return_value=["a"]), redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(sync.main(["pin", "--repository", "smarter-sh/smarter-drupal", "--version", "1.0.0"]), 0)
+            code = sync.main(["pin", "--repository", "smarter-sh/smarter-drupal", "--version", "1.0.0"])
+        self.assertEqual(unknown_code, 1)
+        self.assertEqual(code, 0)
         self.assertIn("in a", out.getvalue())
 
 

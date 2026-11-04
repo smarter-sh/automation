@@ -117,6 +117,15 @@ Pull request titles, branch names, commit messages, issue text, package metadata
 - More than a few lines of shell, or any parsing or decision, belongs in `scripts/<name>.py`: standard library only
   (the runner has no virtual environment), run with `python3 -I scripts/<name>.py`, with subcommands for each step
   (e.g. `status`, `publish`, `report`), as `../smarter/scripts/api_contract_sync.py` does.
+- Reuse the shared modules rather than copying from another script: `github_cli` (run `git` and `gh`,
+  `api_pages` for every page of a list, `api_object`, `http_status`, the organization's `repositories`),
+  `result_files` (save results as JSON in one step or job and read them in another, one file or a folder of
+  them), `scan_helpers` (`months_before`, `slack_escape`) and `slack_post`. A script that grows past a few
+  hundred lines becomes a package, a subfolder of `scripts/` with an `__init__.py`, as `scripts/health/` and
+  `scripts/pod_log/` are. Its entry point is still run by path, so it adds `scripts/` to `sys.path` before
+  importing the package's modules (`from health.common import ...`); see `scripts/health/organization_health.py`.
+- Write it for a Python beginner, **one operation per line**: name each intermediate value rather than nesting calls,
+  comprehensions or conditions. The rule and its examples are under "Code style" in `automation-development`.
 - Test it in `scripts/tests/test_<name>.py` with `unittest`, faking every network call (`gh`, `urllib`, Slack).
   No test may reach GitHub, Slack, a package registry or AWS.
 - Shell scripts start with `set -euo pipefail` and pass ShellCheck (actionlint runs it on `run:` blocks too).

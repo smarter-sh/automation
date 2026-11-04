@@ -11,9 +11,37 @@ Each job works on _other_ `smarter-sh` repositories. `CLAUDE.md` has the hard ru
 ## Code style
 
 Write Python for people who are learning how to program in Python. Prefer plain, familiar syntax, descriptive names,
-and explicit steps over clever or compressed code. Aim for roughly one operation per line, but use judgment rather
-than treating this as a hard rule. When a line or condition combines several transformations or checks (especially
-around five), name intermediate values or split the logic into steps. Keep simple, familiar expressions concise. Emphasize clarity and readability over brevity. Use comments to explain why, not what, and avoid repeating the code in the comment.
+and explicit steps over clever or compressed code. Readability beats brevity.
+
+**One operation per line.** Each line does one thing: one call, one transformation, one test, one assignment. When a
+line calls a function on the result of another call, filters and maps and joins in one go, or puts a condition
+inside an f-string, name each intermediate value on its own line. A good name explains the step better than a
+comment would. This is the rule, not a guideline: break it only for an expression any Python beginner reads at a
+glance (`len(items) - 1`, `", ".join(names)`, `name.strip()`).
+
+```python
+# no: four operations, and the reader has to unpack them from the inside out
+lines.append(f"| {result.repository} | {result.workflow.rsplit('/', 1)[-1]} | {emoji} {text}{f' ({result.reason})' if result.reason else ''} |")
+
+# yes
+workflow_file = result.workflow.rsplit("/", 1)[-1]
+reason = f" ({result.reason})" if result.reason else ""
+lines.append(f"| {result.repository} | {workflow_file} | {emoji} {text}{reason} |")
+```
+
+The same applies to:
+
+- **Comprehensions:** one `for` and at most one simple `if`. Nested comprehensions, a comprehension that builds a
+  dict of comprehensions, or one whose expression is itself a chain of calls, become a plain `for` loop.
+- **Conditions:** at most two checks joined by `and`/`or`. More, or any check that needs reading twice, gets a
+  named boolean (`is_dependabot = ...`) or a small function with a docstring.
+- **Chained calls:** `(run_json(...) or {}).get("workflows", [])` is three steps; write three lines.
+- **Packed assignments:** `a, b, c = x, y, z` only for values that belong together (a pair a function returns);
+  never to set unrelated variables in one line.
+- **Ternaries:** fine for choosing between two plain values; never nested, never wrapped around a call chain.
+- **Functions:** short and doing one thing. flake8 fails at complexity 10; split well before that.
+
+Use comments to explain why, not what, and avoid repeating the code in the comment.
 
 ## Which skill to load
 

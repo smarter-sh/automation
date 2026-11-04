@@ -31,14 +31,13 @@ request that was closed or needs a person. It exits with 1 when a ``gh`` call fa
 """
 
 import argparse
-import json
 import subprocess  # nosec B404: only for CalledProcessError
 import sys
 import time
-from dataclasses import asdict, dataclass
-from pathlib import Path
+from dataclasses import dataclass
 
 from github_cli import ORGANIZATION, error_line, repositories, run, run_json
+from result_files import load_results, save_results
 
 AUTHOR = "app/dependabot"
 """The author whose pull requests this job acts on."""
@@ -103,10 +102,13 @@ def merge_method(repository: str) -> tuple[str, bool]:
         ("--merge", "allow_merge_commit"),
         ("--rebase", "allow_rebase_merge"),
     ):
-        if settings.get(key, flag == "--squash"):
+        # GitHub allows squash merges unless a repository turns them off.
+        allowed_by_default = flag == "--squash"
+        if settings.get(key, allowed_by_default):
             method = flag
             break
-    return method, bool(settings.get("allow_auto_merge"))
+    allows_auto_merge = bool(settings.get("allow_auto_merge"))
+    return method, allows_auto_merge
 
 
 def view(repository: str, number: int, sleep=time.sleep, tries: int = 4) -> dict:
@@ -126,7 +128,8 @@ def view(repository: str, number: int, sleep=time.sleep, tries: int = 4) -> dict
     state: dict = {}
     for attempt in range(tries):
         state = run_json("gh", "pr", "view", str(number), "--repo", repository, "--json", PR_FIELDS) or {}
-        if state.get("mergeable") != "UNKNOWN" and state.get("mergeStateStatus") != "UNKNOWN":
+        is_computed = state.get("mergeable") != "UNKNOWN" and state.get("mergeStateStatus") != "UNKNOWN"
+        if is_computed:
             return state
         if attempt < tries - 1:
             sleep(5)
@@ -142,7 +145,8 @@ def decide(state: dict, conflicted_at_start: bool, auto_merge: bool) -> str:
     :param auto_merge: Whether the repository allows auto-merge.
     :returns: One of :data:`ACTION_TEXT`'s keys, but ``error``.
     """
-    mergeable, merge_state = state.get("mergeable"), state.get("mergeStateStatus")
+    mergeable = state.get("mergeable")
+    merge_state = state.get("mergeStateStatus")
     if state.get("isDraft") or merge_state == "DRAFT":
         return "draft"
     if mergeable == "CONFLICTING" or merge_state == "DIRTY":
@@ -194,6 +198,58 @@ def act(result: Result, method: str, run_url: str) -> None:
         run("gh", "pr", "close", number, "--repo", result.repository, "--comment", close_comment(run_url))
 
 
+def _had_conflicts(item: dict) -> bool:
+    """
+    Tell whether a pull request had merge conflicts when the run listed it.
+
+    :param item: Its fields (:data:`PR_FIELDS`), as ``gh pr list`` printed them.
+    :returns: Whether GitHub said it conflicts.
+    """
+    return item.get("mergeable") == "CONFLICTING" or item.get("mergeStateStatus") == "DIRTY"
+
+
+def _result_from_listing(repository: str, item: dict) -> Result:
+    """
+    Start a pull request's result from what ``gh pr list`` printed.
+
+    :param repository: The repository, as ``owner/name``.
+    :param item: Its fields (:data:`PR_FIELDS`).
+    :returns: Its result, with the default action.
+    """
+    return Result(
+        repository=repository,
+        number=int(item["number"]),
+        title=item.get("title", ""),
+        url=item.get("url", ""),
+        base=item.get("baseRefName", ""),
+    )
+
+
+def _record_error(result: Result, error: subprocess.CalledProcessError) -> None:
+    """
+    Record a failed ``gh`` call on a pull request's result.
+
+    :param result: The pull request's result. Its :attr:`Result.error` is set, and its :attr:`Result.action` becomes
+        ``error`` unless the call that failed was the merge or close it had decided on.
+    :param error: The failed ``gh`` call.
+    """
+    result.error = error_line(error)
+    if result.action not in ("merged", "auto_merge", "closed"):
+        result.action = "error"
+
+
+def _print_result(result: Result, dry_run: bool) -> None:
+    """
+    Print a pull request's result to the job's log.
+
+    :param result: The pull request's result.
+    :param dry_run: Whether nothing was merged or closed.
+    """
+    dry_run_note = " (dry run)" if dry_run else ""
+    line = f"{result.repository}#{result.number}: {result.action}{dry_run_note} {result.error}"
+    print(line.rstrip())
+
+
 def process_repository(repository: str, run_url: str, dry_run: bool, sleep=time.sleep) -> list[Result]:
     """
     Act on every open Dependabot pull request of one repository, oldest first.
@@ -212,23 +268,20 @@ def process_repository(repository: str, run_url: str, dry_run: bool, sleep=time.
     if not listed:
         return []
     method, auto_merge = merge_method(repository)
+    oldest_first = sorted(listed, key=lambda pr: pr["number"])
     results = []
-    for item in sorted(listed, key=lambda pr: pr["number"]):
-        result = Result(
-            repository, int(item["number"]), item.get("title", ""), item.get("url", ""), item.get("baseRefName", "")
-        )
+    for item in oldest_first:
+        result = _result_from_listing(repository, item)
         results.append(result)
-        conflicted_at_start = item.get("mergeable") == "CONFLICTING" or item.get("mergeStateStatus") == "DIRTY"
+        conflicted_at_start = _had_conflicts(item)
         try:
             state = view(repository, result.number, sleep)
             result.action = decide(state, conflicted_at_start, auto_merge)
             if not dry_run:
                 act(result, method, run_url)
         except subprocess.CalledProcessError as error:
-            result.error = error_line(error)
-            if result.action not in ("merged", "auto_merge", "closed"):
-                result.action = "error"
-        print(f"{repository}#{result.number}: {result.action}{' (dry run)' if dry_run else ''} {result.error}".rstrip())
+            _record_error(result, error)
+        _print_result(result, dry_run)
     return results
 
 
@@ -249,7 +302,9 @@ def process_all(organization: str, run_url: str, dry_run: bool, sleep=time.sleep
         try:
             results += process_repository(name, run_url, dry_run, sleep)
         except subprocess.CalledProcessError as error:
-            results.append(Result(name, 0, "", f"https://github.com/{name}/pulls", "", "error", error_line(error)))
+            pulls_url = f"https://github.com/{name}/pulls"
+            failure = Result(name, 0, "", pulls_url, "", action="error", error=error_line(error))
+            results.append(failure)
     return results
 
 
@@ -272,7 +327,10 @@ def describe(result: Result, dry_run: bool) -> tuple[str, str]:
     """
     text, emoji = ACTION_TEXT[result.action]
     if result.error:
-        text = f"{text}: {result.error}" if result.action == "error" else f"{text} failed: {result.error}"
+        if result.action == "error":
+            text = f"{text}: {result.error}"
+        else:
+            text = f"{text} failed: {result.error}"
         emoji = ":x:"
     elif dry_run and result.action in ("merged", "auto_merge", "closed"):
         text = f"would be {text}"
@@ -288,8 +346,9 @@ def summary_markdown(results: list[Result], run_url: str, dry_run: bool) -> str:
     :param dry_run: Whether nothing was merged or closed.
     :returns: The summary, in GitHub Markdown.
     """
+    dry_run_note = " (dry run)" if dry_run else ""
     lines = [
-        "## Dependabot merge" + (" (dry run)" if dry_run else ""),
+        f"## Dependabot merge{dry_run_note}",
         "",
         "| Repository | Pull request | Into | Result |",
         "| --- | --- | --- | --- |",
@@ -317,27 +376,65 @@ def slack_message(results: list[Result], run_url: str, dry_run: bool) -> str:
     :param dry_run: Whether nothing was merged or closed.
     :returns: The message.
     """
-    title = "*Dependabot merge*" + (" (dry run)" if dry_run else "")
+    dry_run_note = " (dry run)" if dry_run else ""
+    title = f"*Dependabot merge*{dry_run_note}"
     if not results:
         return f":white_check_mark: {title}: no open Dependabot pull requests. <{run_url}|The run>"
     lines = [title]
-    quiet = [result for result in results if result.action in QUIET and not result.error]
+    quiet = [result for result in results if _is_quiet(result)]
     for result in results:
         if result in quiet:
             continue
-        text, emoji = describe(result, dry_run)
-        name = result.repository.rsplit("/", 1)[-1]
-        link = f"<{result.url}|{name}#{result.number}>" if result.number else f"<{result.url}|{name}>"
-        lines.append(f"{emoji} {link} {result.title}: {text}".replace("  ", " "))
-    merged = sum(1 for result in quiet if result.action == "merged")
-    auto = len(quiet) - merged
+        lines.append(_slack_line(result, dry_run))
     if quiet:
-        verb = "would be merged" if dry_run else "merged"
-        lines.append(
-            f":white_check_mark: {merged} {verb}" + (f", {auto} set to merge once their checks pass" if auto else "")
-        )
+        lines.append(_merged_count_line(quiet, dry_run))
     lines.append(f"<{run_url}|The run>")
     return "\n".join(lines)
+
+
+def _is_quiet(result: Result) -> bool:
+    """
+    Tell whether a Slack message only counts a result, rather than lists it.
+
+    :param result: The pull request.
+    :returns: Whether it merged, or will, without an error.
+    """
+    return result.action in QUIET and not result.error
+
+
+def _slack_line(result: Result, dry_run: bool) -> str:
+    """
+    Write a Slack message's line for a pull request that was closed or needs a person.
+
+    :param result: The pull request.
+    :param dry_run: Whether nothing was merged or closed.
+    :returns: The line, in Slack's mrkdwn.
+    """
+    text, emoji = describe(result, dry_run)
+    name = result.repository.rsplit("/", 1)[-1]
+    if result.number:
+        link = f"<{result.url}|{name}#{result.number}>"
+    else:
+        link = f"<{result.url}|{name}>"
+    line = f"{emoji} {link} {result.title}: {text}"
+    return line.replace("  ", " ")
+
+
+def _merged_count_line(quiet: list[Result], dry_run: bool) -> str:
+    """
+    Write a Slack message's line that counts the pull requests that merged, or will.
+
+    :param quiet: The results that the message only counts (:func:`_is_quiet`).
+    :param dry_run: Whether nothing was merged.
+    :returns: The line, in Slack's mrkdwn.
+    """
+    merged = sum(1 for result in quiet if result.action == "merged")
+    auto = len(quiet) - merged
+    verb = "would be merged" if dry_run else "merged"
+    line = f":white_check_mark: {merged} {verb}"
+    if auto:
+        line += f", {auto} set to merge once their checks pass"
+    return line
 
 
 def save(results: list[Result], path: str) -> None:
@@ -347,7 +444,7 @@ def save(results: list[Result], path: str) -> None:
     :param results: The results.
     :param path: The file to write.
     """
-    Path(path).write_text(json.dumps([asdict(result) for result in results], indent=2) + "\n", encoding="utf-8")
+    save_results(results, path)
 
 
 def load(path: str) -> list[Result] | None:
@@ -357,13 +454,7 @@ def load(path: str) -> list[Result] | None:
     :param path: The file.
     :returns: The results, or None when the file is missing or isn't JSON.
     """
-    try:
-        items = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return [
-        Result(**{key: value for key, value in item.items() if key in Result.__dataclass_fields__}) for item in items
-    ]
+    return load_results(Result, path)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -373,7 +464,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     :param argv: The arguments, without the program's name. None reads ``sys.argv``.
     :returns: The parsed arguments, with the subcommand's name in ``command``.
     """
-    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
+    docstring = __doc__ or ""
+    first_line = docstring.splitlines()[0]
+    parser = argparse.ArgumentParser(description=first_line)
     commands = parser.add_subparsers(dest="command", required=True)
 
     run_parser = commands.add_parser("run", help="Merge or close every open Dependabot pull request.")
@@ -400,22 +493,44 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = parse_args(argv)
     if args.command == "run":
-        try:
-            results = process_all(args.organization, args.run_url, args.dry_run)
-        except subprocess.CalledProcessError as error:
-            print(f"dependabot_merge.py: couldn't list the repositories: {error_line(error)}", file=sys.stderr)
-            return 1
-        save(results, args.output)
-        return 0
+        return _run(args)
+    return _report(args)
+
+
+def _run(args: argparse.Namespace) -> int:
+    """
+    Act on every open Dependabot pull request, and save the results.
+
+    :param args: The ``run`` subcommand's arguments.
+    :returns: The exit code: 0, or 1 when the repositories couldn't be listed.
+    """
+    try:
+        results = process_all(args.organization, args.run_url, args.dry_run)
+    except subprocess.CalledProcessError as error:
+        print(f"dependabot_merge.py: couldn't list the repositories: {error_line(error)}", file=sys.stderr)
+        return 1
+    save(results, args.output)
+    return 0
+
+
+def _report(args: argparse.Namespace) -> int:
+    """
+    Append the summary to the run's page, and print the Slack message.
+
+    :param args: The ``report`` subcommand's arguments.
+    :returns: The exit code: 0, or 1 when there are no results, or a ``gh`` call failed.
+    """
     loaded = load(args.results)
     if loaded is None:
         print(f"dependabot_merge.py: no results in {args.results}", file=sys.stderr)
         return 1
     if args.summary:
+        markdown = summary_markdown(loaded, args.run_url, args.dry_run)
         with open(args.summary, "a", encoding="utf-8") as summary:
-            summary.write(summary_markdown(loaded, args.run_url, args.dry_run))
+            summary.write(markdown)
     print(slack_message(loaded, args.run_url, args.dry_run))
-    return 1 if any(failed(result) for result in loaded) else 0
+    any_failed = any(failed(result) for result in loaded)
+    return 1 if any_failed else 0
 
 
 if __name__ == "__main__":

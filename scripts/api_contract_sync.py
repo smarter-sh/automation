@@ -69,10 +69,11 @@ import json
 import os
 import subprocess  # nosec B404: runs git and gh with fixed arguments
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from github_cli import error_line, run
+from result_files import load_result, load_result_folder, save_result
 
 LABEL = "api-contract"
 """The label of the issue that this workflow opens in each repository.
@@ -126,6 +127,9 @@ VERDICT_TEXT = {
     "failing": ("tests fail before the sync", ":warning:"),
 }
 """Each :attr:`Result.verdict`'s words, for the run's page and Slack, and its Slack emoji."""
+
+OUTCOME_WORDS = {"success": "pass", "failure": "fail", "skipped": "skipped", "cancelled": "cancelled"}
+"""A step's outcome, as GitHub reports it, in the words of a table (:func:`outcome`)."""
 
 
 @dataclass
@@ -206,11 +210,12 @@ class Result:  # pylint: disable=too-many-instance-attributes
 
         :returns: True when a changed file is one of :attr:`shipped`, or inside one of its folders.
         """
-        return any(
-            path == prefix or path.startswith(prefix.rstrip("/") + "/")
-            for path in self.changed
-            for prefix in self.shipped
-        )
+        for prefix in self.shipped:
+            folder = prefix.rstrip("/") + "/"
+            for path in self.changed:
+                if path == prefix or path.startswith(folder):
+                    return True
+        return False
 
     @property
     def verdict(self) -> str:
@@ -223,7 +228,9 @@ class Result:  # pylint: disable=too-many-instance-attributes
             return "failing"
         if self.broken:
             return "broken"
-        return "outdated" if self.out_of_sync else "current"
+        if self.out_of_sync:
+            return "outdated"
+        return "current"
 
     @classmethod
     def load(cls, path: str | Path) -> "Result":
@@ -239,9 +246,7 @@ class Result:  # pylint: disable=too-many-instance-attributes
         :raises ValueError: When it isn't JSON.
         :raises TypeError: When it lacks a required field, e.g. ``repository``.
         """
-        text = Path(path).read_text(encoding="utf-8")
-        data = json.loads(text)
-        return cls(**{key: value for key, value in data.items() if key in cls.__dataclass_fields__})
+        return load_result(cls, path)
 
     def save(self, path: str | Path) -> None:
         """
@@ -249,7 +254,7 @@ class Result:  # pylint: disable=too-many-instance-attributes
 
         :param path: The file to write.
         """
-        Path(path).write_text(json.dumps(asdict(self), indent=2) + "\n", encoding="utf-8")
+        save_result(self, path)
 
 
 def parse_porcelain(text: str) -> list[str]:
@@ -285,7 +290,8 @@ def changed_files() -> list[str]:
 
     :returns: The changed, added and removed paths, relative to the repository's root.
     """
-    return parse_porcelain(run("git", "status", "--porcelain", "--untracked-files=all", strip=False))
+    text = run("git", "status", "--porcelain", "--untracked-files=all", strip=False)
+    return parse_porcelain(text)
 
 
 def file_list(paths: list[str]) -> str:
@@ -296,10 +302,12 @@ def file_list(paths: list[str]) -> str:
     :returns: One ``- `path``` line per path, cut to :data:`MAX_FILES` with a line that counts the
         rest, or ``- (none)`` when there are none.
     """
+    if not paths:
+        return "- (none)"
     lines = [f"- `{path}`" for path in paths[:MAX_FILES]]
     if len(paths) > MAX_FILES:
         lines.append(f"- ... and {len(paths) - MAX_FILES} more")
-    return "\n".join(lines) or "- (none)"
+    return "\n".join(lines)
 
 
 def outcome(value: str) -> str:
@@ -310,7 +318,7 @@ def outcome(value: str) -> str:
     :returns: ``pass``, ``fail``, ``skipped`` or ``cancelled``, or ``value`` itself when it is
         none of those.
     """
-    return {"success": "pass", "failure": "fail", "skipped": "skipped", "cancelled": "cancelled"}.get(value, value)
+    return OUTCOME_WORDS.get(value, value)
 
 
 def tag_url(tag: str) -> str:
@@ -350,12 +358,14 @@ def commit_body(result: Result, run_url: str) -> str:
     :param run_url: The workflow run's url, which the body cites.
     :returns: The body, in plain text.
     """
+    before = outcome(result.baseline)
+    after = outcome(result.tests)
     return "\n".join(
         [
             f"Copy the Smarter platform's api contract at its release {result.tag} with "
             f"scripts/sync-contracts.sh, and regenerate the code generated from it.",
             "",
-            f"Tests before the sync: {outcome(result.baseline)}. After it: {outcome(result.tests)}.",
+            f"Tests before the sync: {before}. After it: {after}.",
             "",
             f"Opened by The Smarter Project's API Contract Sync workflow (smarter-sh/automation): {run_url}",
             "",
@@ -375,47 +385,60 @@ def issue_title(result: Result) -> str:
     return f"The api contract is out of date: sync with smarter {result.tag}"
 
 
+def _issue_advice(result: Result) -> str:
+    """
+    Write the issue's advice, which depends on the verdict.
+
+    A compatible sync only needs its pull request merged. A broken one needs work that the
+    ``smarter-contract-sync`` skill's step 4 describes, e.g. a new operation to cover, or a recorded
+    response that lacks a new required field. When the tests already fail before the sync, those
+    come first.
+
+    :param result: The repository's result.
+    :returns: One paragraph, in GitHub Markdown.
+    """
+    if result.broken:
+        return (
+            f"**The tests fail after the sync.** They pass with the current copy, so smarter {result.tag} changed the "
+            "contract in a way that needs work here: a new operation, a removed or renamed field, or a recorded "
+            "response that lacks a new required field. Follow the `smarter-contract-sync` skill, step 4."
+        )
+    if result.baseline != "success":
+        return (
+            "**The tests already fail before the sync**, so this check can't tell whether the new contract "
+            "breaks anything. Fix the failing tests first."
+        )
+    return "The tests pass after the sync, so the update is compatible. Review and merge the pull request."
+
+
 def issue_body(result: Result, run_url: str) -> str:
     """
     Write the issue's body: what changed, what the tests say, and what the maintainer does next.
-
-    The advice depends on the verdict. A compatible sync only needs its pull request merged. A
-    broken one needs work that the ``smarter-contract-sync`` skill's step 4 describes, e.g. a new
-    operation to cover, or a recorded response that lacks a new required field. When the tests
-    already fail before the sync, those come first.
 
     :param result: The repository's result.
     :param run_url: The workflow run's url, which the body links.
     :returns: The body, in GitHub Markdown.
     """
-    if result.broken:
-        status = (
-            f"**The tests fail after the sync.** They pass with the current copy, so smarter {result.tag} changed the "
-            "contract in a way that needs work here: a new operation, a removed or renamed field, or a recorded "
-            "response that lacks a new required field. Follow the `smarter-contract-sync` skill, step 4."
-        )
-    elif result.baseline != "success":
-        status = (
-            "**The tests already fail before the sync**, so this check can't tell whether the new contract "
-            "breaks anything. Fix the failing tests first."
-        )
-    else:
-        status = "The tests pass after the sync, so the update is compatible. Review and merge the pull request."
+    release_url = tag_url(result.tag)
+    advice = _issue_advice(result)
+    before = outcome(result.baseline)
+    after = outcome(result.tests)
+    files = file_list(result.changed)
     return "\n".join(
         [
             f"This repository's copy of the Smarter platform's api contract differs from the platform's latest "
-            f"release, [smarter {result.tag}]({tag_url(result.tag)}).",
+            f"release, [smarter {result.tag}]({release_url}).",
             "",
-            status,
+            advice,
             "",
             "| Tests | Result |",
             "| --- | --- |",
-            f"| Before the sync | {outcome(result.baseline)} |",
-            f"| After the sync | {outcome(result.tests)} |",
+            f"| Before the sync | {before} |",
+            f"| After the sync | {after} |",
             "",
             f"Files that `scripts/sync-contracts.sh {result.tag}` and the regeneration change:",
             "",
-            file_list(result.changed),
+            files,
             "",
             f"To sync by hand: `make sam-models SMARTER_REF={result.tag}` in the SDKs, "
             f"`make contracts SMARTER_REF={result.tag}` in the cli and the extension.",
@@ -437,9 +460,13 @@ def pull_request_body(result: Result, run_url: str, issue_number: str) -> str:
     :returns: The body, in GitHub Markdown. For a broken sync, it says why the pull request is a
         draft, and where its fixes go.
     """
+    release_url = tag_url(result.tag)
+    before = outcome(result.baseline)
+    after = outcome(result.tests)
+    files = file_list(result.changed)
     lines = [
         f"Syncs this repository's copy of the Smarter platform's api contract with its release "
-        f"[smarter {result.tag}]({tag_url(result.tag)}), and regenerates the code generated from it.",
+        f"[smarter {result.tag}]({release_url}), and regenerates the code generated from it.",
         "",
     ]
     if issue_number:
@@ -453,12 +480,12 @@ def pull_request_body(result: Result, run_url: str, issue_number: str) -> str:
     lines += [
         "| Tests | Result |",
         "| --- | --- |",
-        f"| Before the sync | {outcome(result.baseline)} |",
-        f"| After the sync | {outcome(result.tests)} |",
+        f"| Before the sync | {before} |",
+        f"| After the sync | {after} |",
         "",
         "Changed files:",
         "",
-        file_list(result.changed),
+        files,
         "",
         f"Opened by The Smarter Project's weekly [API Contract Sync]({run_url}) workflow. A later run force-pushes "
         f"the branch `{BRANCH}` with the newest sync, so commit any fixes before the next run, or rename "
@@ -482,8 +509,12 @@ def find_open(kind: str, repository: str, *selector: str) -> dict | None:
     text = run(
         "gh", kind, "list", "--repo", repository, "--state", "open", *selector, "--json", "number,url", "--limit", "1"
     )  # fmt: skip
-    items = json.loads(text or "[]")
-    return items[0] if items else None
+    if not text:
+        return None
+    items = json.loads(text)
+    if not items:
+        return None
+    return items[0]
 
 
 def close_stale(result: Result) -> None:
@@ -526,7 +557,8 @@ def open_or_update_issue(result: Result, run_url: str) -> dict:
         "gh", "label", "create", LABEL, "--repo", result.repository,
         "--color", LABEL_COLOR, "--description", LABEL_DESCRIPTION, "--force",
     )  # fmt: skip
-    title, body = issue_title(result), issue_body(result, run_url)
+    title = issue_title(result)
+    body = issue_body(result, run_url)
     issue = find_open("issue", result.repository, "--label", LABEL)
     if issue:
         run(
@@ -538,7 +570,8 @@ def open_or_update_issue(result: Result, run_url: str) -> dict:
         "gh", "issue", "create", "--repo", result.repository, "--title", title, "--label", LABEL,
         "--body-file", "-", input_text=body,
     )  # fmt: skip
-    return {"number": url.rstrip("/").rsplit("/", 1)[-1], "url": url}
+    number = url.rstrip("/").rsplit("/", 1)[-1]
+    return {"number": number, "url": url}
 
 
 def push_sync_commit(result: Result, run_url: str) -> None:
@@ -559,14 +592,10 @@ def push_sync_commit(result: Result, run_url: str) -> None:
     run("git", "config", "user.email", BOT_EMAIL)
     run("git", "checkout", "-B", BRANCH)
     run("git", "add", "--all")
-    run(
-        "git",
-        "commit",
-        "--quiet",
-        "--file",
-        "-",
-        input_text=commit_subject(result) + "\n\n" + commit_body(result, run_url),
-    )
+    subject = commit_subject(result)
+    body = commit_body(result, run_url)
+    message = subject + "\n\n" + body
+    run("git", "commit", "--quiet", "--file", "-", input_text=message)
     run("git", "push", "--force", "--quiet", "origin", f"HEAD:refs/heads/{BRANCH}")
 
 
@@ -587,23 +616,15 @@ def open_or_update_pull_request(result: Result, run_url: str, base: str, issue_n
     :returns: The pull request's url.
     :raises subprocess.CalledProcessError: When ``gh`` fails.
     """
-    title, body = commit_subject(result), pull_request_body(result, run_url, issue_number)
+    title = commit_subject(result)
+    body = pull_request_body(result, run_url, issue_number)
     pull_request = find_open("pr", result.repository, "--head", BRANCH)
     if pull_request:
         number = str(pull_request["number"])
         run(
-            "gh",
-            "pr",
-            "edit",
-            number,
-            "--repo",
-            result.repository,
-            "--title",
-            title,
-            "--body-file",
-            "-",
-            input_text=body,
-        )
+            "gh", "pr", "edit", number, "--repo", result.repository,
+            "--title", title, "--body-file", "-", input_text=body,
+        )  # fmt: skip
         draft_flag = [] if result.broken else ["--undo"]
         run("gh", "pr", "ready", number, "--repo", result.repository, *draft_flag, check=False)
         return pull_request["url"]
@@ -655,9 +676,29 @@ def publish(result: Result, base: str, run_url: str, dry_run: bool) -> Result:
     issue = open_or_update_issue(result, run_url)
     result.issue_url = issue["url"]
     push_sync_commit(result, run_url)
-    result.pull_request_url = open_or_update_pull_request(result, run_url, base, str(issue["number"]))
+    issue_number = str(issue["number"])
+    result.pull_request_url = open_or_update_pull_request(result, run_url, base, issue_number)
     print(f"{result.repository}: {result.verdict}. Issue {result.issue_url}, pull request {result.pull_request_url}")
     return result
+
+
+def _summary_row(result: Result) -> str:
+    """
+    Write one repository's row of the run's job summary.
+
+    :param result: The repository's result.
+    :returns: The table row, in GitHub Markdown.
+    """
+    text, _ = VERDICT_TEXT[result.verdict]
+    error = f" ({result.error})" if result.error else ""
+    before = outcome(result.baseline)
+    after = outcome(result.tests)
+    issue = f"[issue]({result.issue_url})" if result.issue_url else ""
+    pull_request = f"[pull request]({result.pull_request_url})" if result.pull_request_url else ""
+    return (
+        f"| {result.repository} | {text}{error} | {before} | {after} "
+        f"| {len(result.changed)} | {issue} | {pull_request} |"
+    )
 
 
 def summary_markdown(results: list[Result], tag: str, run_url: str) -> str:
@@ -679,18 +720,56 @@ def summary_markdown(results: list[Result], tag: str, run_url: str) -> str:
         "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for result in results:
-        text, _ = VERDICT_TEXT[result.verdict]
-        issue = f"[issue]({result.issue_url})" if result.issue_url else ""
-        pull_request = f"[pull request]({result.pull_request_url})" if result.pull_request_url else ""
-        error = f" ({result.error})" if result.error else ""
-        lines.append(
-            f"| {result.repository} | {text}{error} | {outcome(result.baseline)} | {outcome(result.tests)} "
-            f"| {len(result.changed)} | {issue} | {pull_request} |"
-        )
+        lines.append(_summary_row(result))
     if not results:
         lines.append("| (no results) | | | | | | |")
     lines += ["", f"[The run]({run_url})"]
     return "\n".join(lines) + "\n"
+
+
+def _is_healthy(result: Result) -> bool:
+    """
+    Tell whether a repository needs no attention.
+
+    :param result: The repository's result.
+    :returns: True when its copy is current, and publishing didn't fail.
+    """
+    return result.verdict == "current" and not result.error
+
+
+def _short_names(results: list[Result]) -> str:
+    """
+    Name repositories without their owner, for Slack.
+
+    :param results: The repositories' results.
+    :returns: e.g. ``smarter-python, smarter-cli``.
+    """
+    names = []
+    for result in results:
+        name = result.repository.rsplit("/", 1)[-1]
+        names.append(name)
+    return ", ".join(names)
+
+
+def _attention_line(result: Result) -> str:
+    """
+    Write the Slack line of a repository that needs attention.
+
+    :param result: The repository's result.
+    :returns: Its verdict's emoji and words, any error, and links to its issue and pull request.
+    """
+    text, emoji = VERDICT_TEXT[result.verdict]
+    if result.error:
+        text = f"{text}; {result.error}"
+    links = []
+    if result.issue_url:
+        links.append(f"<{result.issue_url}|issue>")
+    if result.pull_request_url:
+        links.append(f"<{result.pull_request_url}|pull request>")
+    line = f"{emoji} {result.repository}: {text}"
+    if links:
+        line += f" ({', '.join(links)})"
+    return line
 
 
 def slack_message(results: list[Result], tag: str, run_url: str) -> str:
@@ -708,29 +787,19 @@ def slack_message(results: list[Result], tag: str, run_url: str) -> str:
     :param run_url: The workflow run's url.
     :returns: The message. ``scripts/slack_post.py`` posts it.
     """
-    healthy = bool(results) and all(result.verdict == "current" and not result.error for result in results)
-    if healthy:
-        names = ", ".join(result.repository.rsplit("/", 1)[-1] for result in results)
+    current = [result for result in results if _is_healthy(result)]
+    attention = [result for result in results if not _is_healthy(result)]
+    if results and not attention:
+        names = _short_names(results)
         return (
             f":white_check_mark: *API contract: clean bill of health.* Every repository's copy of the api contract "
             f"is current with smarter {tag}, and its tests pass: {names}. <{run_url}|The run>"
         )
     lines = [f"*API contract sync with smarter {tag}*"]
-    current = [result for result in results if result.verdict == "current" and not result.error]
-    for result in results:
-        if result in current:
-            continue
-        text, emoji = VERDICT_TEXT[result.verdict]
-        if result.error:
-            text = f"{text}; {result.error}"
-        links = [
-            f"<{url}|{name}>"
-            for name, url in (("issue", result.issue_url), ("pull request", result.pull_request_url))
-            if url
-        ]
-        lines.append(f"{emoji} {result.repository}: {text}" + (f" ({', '.join(links)})" if links else ""))
+    for result in attention:
+        lines.append(_attention_line(result))
     if current:
-        names = ", ".join(result.repository.rsplit("/", 1)[-1] for result in current)
+        names = _short_names(current)
         lines.append(f":white_check_mark: {len(current)} more current: {names}")
     if not results:
         lines.append(":warning: No repository reported a result.")
@@ -749,13 +818,7 @@ def load_results(directory: str) -> list[Result]:
     :param directory: The folder, searched recursively for ``*.json`` files.
     :returns: The results, sorted by repository.
     """
-    results = []
-    for path in sorted(Path(directory).rglob("*.json")):
-        try:
-            results.append(Result.load(path))
-        except (OSError, ValueError, TypeError):
-            continue
-    return sorted(results, key=lambda result: result.repository)
+    return load_result_folder(Result, directory)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -765,7 +828,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     :param argv: The arguments, without the program's name. None reads ``sys.argv``.
     :returns: The parsed arguments, with the subcommand's name in ``command``.
     """
-    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
+    module_doc = __doc__ or ""
+    first_line = module_doc.splitlines()[0]
+    parser = argparse.ArgumentParser(description=first_line)
     commands = parser.add_subparsers(dest="command", required=True)
 
     status = commands.add_parser("status", help="Write the checkout's result as JSON.")
@@ -791,6 +856,78 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def status_command(args: argparse.Namespace) -> int:
+    """
+    Run ``status``: write the checkout's result as JSON.
+
+    :param args: The parsed arguments.
+    :returns: The exit code, 0.
+    """
+    result = Result(
+        repository=args.repository,
+        tag=args.tag,
+        sha=args.sha,
+        changed=changed_files(),
+        shipped=args.shipped.split(),
+        baseline=args.baseline,
+        tests=args.tests,
+    )
+    result.save(args.output)
+    print(f"{result.repository}: {result.verdict}, {len(result.changed)} changed files.")
+    return 0
+
+
+def publish_command(args: argparse.Namespace) -> int:
+    """
+    Run ``publish``, and save its result even when it fails.
+
+    :param args: The parsed arguments.
+    :returns: The exit code: 0, or 1 when publishing failed.
+    """
+    result = Result.load(args.result)
+    try:
+        publish(result, args.base, args.run_url, args.dry_run)
+    except subprocess.CalledProcessError as error:
+        result.error = f"publishing failed: {error_line(error)}"
+        print(f"{result.repository}: {result.error}", file=sys.stderr)
+        result.save(args.result)
+        return 1
+    result.save(args.result)
+    return 0
+
+
+def _has_failed(result: Result) -> bool:
+    """
+    Tell whether a repository's result should turn the run red.
+
+    :param result: The repository's result.
+    :returns: True when its tests fail, before or after the sync, or publishing failed.
+    """
+    tests_fail = result.verdict in ("broken", "failing")
+    return tests_fail or bool(result.error)
+
+
+def report_command(args: argparse.Namespace) -> int:
+    """
+    Run ``report``: append the job summary, and print the Slack message.
+
+    :param args: The parsed arguments.
+    :returns: The exit code: 0, or 1 when there is no result, or one has failed.
+    """
+    results = load_results(args.results)
+    if args.summary:
+        markdown = summary_markdown(results, args.tag, args.run_url)
+        with open(args.summary, "a", encoding="utf-8") as summary:
+            summary.write(markdown)
+    print(slack_message(results, args.tag, args.run_url))
+    if not results:
+        return 1
+    for result in results:
+        if _has_failed(result):
+            return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """
     Run one subcommand.
@@ -805,38 +942,10 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = parse_args(argv)
     if args.command == "status":
-        result = Result(
-            repository=args.repository,
-            tag=args.tag,
-            sha=args.sha,
-            changed=changed_files(),
-            shipped=args.shipped.split(),
-            baseline=args.baseline,
-            tests=args.tests,
-        )
-        result.save(args.output)
-        print(f"{result.repository}: {result.verdict}, {len(result.changed)} changed files.")
-        return 0
+        return status_command(args)
     if args.command == "publish":
-        result = Result.load(args.result)
-        try:
-            publish(result, args.base, args.run_url, args.dry_run)
-        except subprocess.CalledProcessError as error:
-            result.error = f"publishing failed: {error_line(error)}"
-            print(f"{result.repository}: {result.error}", file=sys.stderr)
-            result.save(args.result)
-            return 1
-        result.save(args.result)
-        return 0
-    results = load_results(args.results)
-    if args.summary:
-        with open(args.summary, "a", encoding="utf-8") as summary:
-            summary.write(summary_markdown(results, args.tag, args.run_url))
-    print(slack_message(results, args.tag, args.run_url))
-    if not results:
-        return 1
-    has_failed_result = any(result.verdict in ("broken", "failing") or result.error for result in results)
-    return 1 if has_failed_result else 0
+        return publish_command(args)
+    return report_command(args)
 
 
 if __name__ == "__main__":

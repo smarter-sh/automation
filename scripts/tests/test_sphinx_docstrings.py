@@ -6,19 +6,32 @@ import unittest
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1]
+PACKAGES = ["health", "pod_log"]
+
+
+def production_scripts() -> list[Path]:
+    """Return the scripts in scripts/ and in its packages, but not the tests.
+
+    :returns: The scripts' paths, sorted.
+    """
+    paths = list(SCRIPTS.glob("*.py"))
+    for package in PACKAGES:
+        package_paths = SCRIPTS.joinpath(package).glob("*.py")
+        paths.extend(package_paths)
+    return sorted(paths)
 
 
 class TestSphinxDocstrings(unittest.TestCase):
     """Every production script has module documentation and documented function fields."""
 
     def test_module_docstrings(self):
-        for path in sorted(SCRIPTS.glob("*.py")):
+        for path in production_scripts():
             with self.subTest(module=path.name):
                 module = ast.parse(path.read_text(encoding="utf-8"))
                 self.assertTrue(ast.get_docstring(module), f"{path.name} has no module docstring")
 
     def test_function_parameters_and_returns(self):
-        for path in sorted(SCRIPTS.glob("*.py")):
+        for path in production_scripts():
             module = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(module):
                 if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
