@@ -93,7 +93,7 @@ jobs:
       version: ${{ steps.package.outputs.version }}
     steps:
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
 
@@ -141,13 +141,13 @@ jobs:
     steps:
       # this repository, for scripts/. First, because a checkout at the workspace's root would remove the others.
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       # every branch and tag, to read the latest release; the token is kept for publish's push.
       - name: Checkout ${{ matrix.repository }}
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: smarter-sh/${{ matrix.repository }}
           ref: ${{ env.BASE }}
@@ -157,7 +157,7 @@ jobs:
           token: ${{ secrets.PAT || github.token }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
 
@@ -184,7 +184,7 @@ jobs:
 
       - name: Upload the result
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: embed-version-sync-${{ matrix.repository }}
           path: ${{ runner.temp }}/result/
@@ -197,12 +197,12 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Download the results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: embed-version-sync-*
           path: ${{ runner.temp }}/results

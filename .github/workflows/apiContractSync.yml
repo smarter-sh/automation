@@ -99,7 +99,7 @@ jobs:
       sha: ${{ steps.release.outputs.sha }}
     steps:
       - name: Checkout the platform
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: smarter-sh/smarter
           ref: main
@@ -171,13 +171,13 @@ jobs:
       # this repository, for scripts/api_contract_sync.py. First, because a checkout at the
       # workspace's root would remove the folders of the others.
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       # the platform, at main, with every tag, which sync-contracts.sh reads with git show.
       - name: Checkout the platform
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: smarter-sh/smarter
           ref: main
@@ -188,7 +188,7 @@ jobs:
 
       # the token is kept in the checkout's git configuration, so that publish can push the sync branch.
       - name: Checkout ${{ matrix.repository }}
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: smarter-sh/${{ matrix.repository }}
           ref: ${{ env.BASE }}
@@ -197,19 +197,19 @@ jobs:
 
       - name: Set up Python
         if: matrix.toolchain == 'python'
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
 
       - name: Set up Node.js
         if: matrix.toolchain == 'node'
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node-version }}
 
       - name: Set up Go
         if: matrix.toolchain == 'go'
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: consumer/go.mod
 
@@ -259,7 +259,7 @@ jobs:
 
       - name: Upload the result
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: api-contract-sync-${{ matrix.repository }}
           path: ${{ runner.temp }}/result/
@@ -272,12 +272,12 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Download the results
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: api-contract-sync-*
           path: ${{ runner.temp }}/results
