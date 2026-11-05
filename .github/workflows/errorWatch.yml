@@ -52,7 +52,7 @@ name: Error Watch
 
 on:
   schedule:
-    - cron: "3-59/15 * * * *" # every 15 minutes, at :03, :13, ...; a first step decides whether to probe
+    - cron: "3-59/15 * * * *" # every 15 minutes, at :03, :18, :33 and :48; a first step decides whether to probe
   workflow_dispatch:
     inputs:
       environment:
