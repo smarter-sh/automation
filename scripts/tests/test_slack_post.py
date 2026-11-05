@@ -104,6 +104,12 @@ class TestPost(unittest.TestCase):
         self.assertEqual((sent["unfurl_links"], sent["unfurl_media"]), (True, True))
         self.assertEqual((answer["channel"], answer["ts"]), ("C1", "1.2"))
 
+    def test_reply_in_a_thread(self):
+        with mock.patch("urllib.request.urlopen", return_value=self.response(b'{"ok": true}')) as urlopen:
+            slack_post.post("C1", "still failing", "xoxb-test", thread_ts="1.2", broadcast=True)
+        sent = json.loads(urlopen.call_args.args[0].data)
+        self.assertEqual((sent["thread_ts"], sent["reply_broadcast"]), ("1.2", True))
+
     def test_raises_when_refused(self):
         body = b'{"ok": false, "error": "not_in_channel"}'
         with mock.patch("urllib.request.urlopen", return_value=self.response(body)):
