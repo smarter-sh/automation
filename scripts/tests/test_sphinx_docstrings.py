@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1]
-PACKAGES = ["health", "pod_log"]
+PACKAGES = ["error_watch", "health", "pod_log"]
 
 
 def production_scripts() -> list[Path]:

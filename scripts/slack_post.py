@@ -26,7 +26,9 @@ import urllib.request
 SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage"
 
 
-def post(channel: str, text: str, token: str, unfurl: bool = False) -> dict:
+def post(
+    channel: str, text: str, token: str, unfurl: bool = False, thread_ts: str = "", broadcast: bool = False
+) -> dict:
     """
     Post a message to a Slack channel with ``chat.postMessage``.
 
@@ -35,10 +37,16 @@ def post(channel: str, text: str, token: str, unfurl: bool = False) -> dict:
     :param token: The bot token.
     :param unfurl: Let Slack expand the message's links into preview cards, e.g. a blog post's
         title, description and image. The workflows' messages leave it off.
+    :param thread_ts: The ``ts`` of an earlier message, to post this one as a reply in its thread.
+        Empty posts to the channel.
+    :param broadcast: With ``thread_ts``, also show the reply in the channel.
     :returns: Slack's answer, with the message's ``channel`` and ``ts``.
     :raises RuntimeError: If Slack refused it, e.g. ``not_in_channel``.
     """
     payload = {"channel": channel, "text": text, "unfurl_links": unfurl, "unfurl_media": unfurl}
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
+        payload["reply_broadcast"] = broadcast
     payload_text = json.dumps(payload)
     body = payload_text.encode()
     request = urllib.request.Request(  # nosec B310: a fixed https url

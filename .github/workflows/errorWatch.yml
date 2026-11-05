@@ -1,0 +1,194 @@
+---
+#------------------------------------------------------------------------------
+# Error Watch.
+#
+# Probes a deployed environment's logs for errors that repeat: Python
+# tracebacks, and ERROR and CRITICAL lines, which suggest a failure or a bug
+# rather than one user's bad request. It reads every pod's log of the last
+# half hour or hour from the environment's Loki, as the Pod Log Review does,
+# puts the tracebacks back together, and counts each error by its exception
+# type and the code that raised it (or, for an ERROR line, by its message with
+# the values taken out). An error logged min-repeats times or more is a problem.
+#
+# When it finds a problem, it posts to Slack, then checks every 10 minutes,
+# replies in that message's thread every 30 minutes while the problem goes on
+# (and at once, also in the channel, if another error starts repeating), and
+# posts, in the thread and the channel, that it is resolved once none of the
+# problem's errors was logged for 20 minutes. Then it goes back to its normal
+# schedule. A probe that finds nothing posts nothing.
+#
+# Schedule. It starts every 10 minutes, and a first step decides whether a
+# probe is due; most runs stop there, in seconds, and never reach AWS:
+#   - every 10 minutes while a problem is open;
+#   - every 20 minutes in business hours, 9:00 US eastern to 17:00 US pacific,
+#     Monday to Friday, with daylight saving time;
+#   - every hour otherwise.
+# Scheduled runs watch prod. A manual run probes now, whatever the schedule.
+#
+# State. What it must remember between runs (the last probe, the open problem,
+# its Slack thread) is a small JSON file in the Actions cache, saved under a
+# new key by each probe, and restored from the newest. It holds times, keys and
+# labels only, never a log line. If the cache is lost, the next probe starts
+# afresh: an open problem is then posted again, as new.
+#
+# The logic is in scripts/error_watch/ (detect.py, schedule.py, incident.py,
+# watch.py), which reads Loki with scripts/pod_log/loki.py and posts with
+# scripts/slack_post.py. Their tests are in scripts/tests.
+#
+# Secrets:
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, EKS_CLUSTER_NAME
+#                     read Loki, through a kubectl port-forward. Read-only.
+#   SLACK_BOT_TOKEN   optional: the Smarter Slack app's bot token, with
+#                     chat:write, and the bot a member of the channel. Without
+#                     it, nothing is posted, and the run's summary still shows
+#                     what was found.
+#
+# This repository's workflow logs are public: the scripts print counts only,
+# and the run's summary names each error by its exception type and code
+# location, or a short id. The redacted messages go to Slack only, and the
+# probe's results file is neither printed nor uploaded.
+#------------------------------------------------------------------------------
+name: Error Watch
+
+on:
+  schedule:
+    - cron: "3-59/15 * * * *" # every 15 minutes, at :03, :13, ...; a first step decides whether to probe
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "The environment whose logs to probe."
+        required: true
+        type: choice
+        default: prod
+        options:
+          - prod
+          - alpha
+          - beta
+          - next
+      min-repeats:
+        description: "How many times an error must be logged in the period to be a problem."
+        required: false
+        type: string
+        default: "5"
+      dry-run:
+        description: "Probe and report only: post nothing to Slack, and save no state."
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: error-watch-${{ inputs.environment || 'prod' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  ENVIRONMENT: ${{ inputs.environment || 'prod' }}
+  NAMESPACE_BASE: "smarter-ubc"
+  PLATFORM_SUBDOMAIN: "ubc"
+  ROOT_DOMAIN: "smarter.sh"
+  MIN_REPEATS: ${{ inputs.min-repeats || '5' }}
+  DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  # Where to post. The Slack app's bot must be a member.
+  SLACK_CHANNEL: "smarter"
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set the namespace, domain and paths
+        shell: bash
+        run: |
+          {
+            echo "NAMESPACE=${NAMESPACE_BASE}-${ENVIRONMENT}"
+            if [ "$ENVIRONMENT" = "prod" ]; then
+              echo "PLATFORM_DOMAIN=${PLATFORM_SUBDOMAIN}.${ROOT_DOMAIN}"
+            else
+              echo "PLATFORM_DOMAIN=${ENVIRONMENT}.${PLATFORM_SUBDOMAIN}.${ROOT_DOMAIN}"
+            fi
+            echo "STATE_FILE=$RUNNER_TEMP/error-watch/state.json"
+            echo "RESULTS_FILE=$RUNNER_TEMP/error-watch-results.json"
+          } >> "$GITHUB_ENV"
+
+      # The newest state of this environment: no cache has this run's key, so restore-keys picks the
+      # most recent one that starts with the prefix.
+      - name: Restore the state
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/error-watch
+          key: error-watch-${{ env.ENVIRONMENT }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: error-watch-${{ env.ENVIRONMENT }}-
+
+      - name: Decide whether a probe is due
+        id: due
+        shell: bash
+        env:
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+        run: |
+          args=(--state "$STATE_FILE")
+          if [ "$FORCE" = "true" ]; then args+=(--force); fi
+          python3 -E -s scripts/error_watch/watch.py due "${args[@]}"
+
+      - name: Configure AWS credentials
+        if: steps.due.outputs.probe == 'true'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # The output names the cluster's ARN, which holds the AWS account id, so it is discarded.
+      - name: Configure kubectl
+        if: steps.due.outputs.probe == 'true'
+        shell: bash
+        env:
+          EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          aws eks --region "$AWS_REGION" update-kubeconfig --name "$EKS_CLUSTER_NAME" --alias "$EKS_CLUSTER_NAME" >/dev/null
+
+      # A port-forward to the namespace's Loki, for the duration of this step only. Prints counts only.
+      - name: Probe the logs
+        if: steps.due.outputs.probe == 'true'
+        shell: bash
+        env:
+          EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+          WINDOW: ${{ steps.due.outputs.window }}
+        run: |
+          python3 -E -s scripts/error_watch/watch.py probe --context "$EKS_CLUSTER_NAME" --namespace "$NAMESPACE" \
+            --window-minutes "$WINDOW" --results "$RESULTS_FILE"
+
+      # Posts to Slack only when something changed, or a reminder is due. If Slack refuses the message,
+      # this step fails and the state is not saved, so the next run tries again.
+      - name: Tell Slack, and update the state
+        id: update
+        if: steps.due.outputs.probe == 'true'
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          args=(--state "$STATE_FILE" --results "$RESULTS_FILE" --channel "$SLACK_CHANNEL" \
+            --where "$PLATFORM_DOMAIN" --run-url "$RUN_URL" --min-repeats "$MIN_REPEATS" \
+            --summary "$GITHUB_STEP_SUMMARY")
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          python3 -E -s scripts/error_watch/watch.py update "${args[@]}"
+
+      - name: Save the state
+        if: steps.update.outcome == 'success' && env.DRY_RUN != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/error-watch
+          key: error-watch-${{ env.ENVIRONMENT }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Remove the results and the cluster credentials
+        if: always()
+        shell: bash
+        run: rm -rf "$RESULTS_FILE" "$HOME/.kube"
