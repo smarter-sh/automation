@@ -70,6 +70,25 @@ class TestPodLogRedact(unittest.TestCase):
         self.assertEqual(redact(line, counts), line)
         self.assertEqual(counts, {})
 
+    def test_redact_keeps_masked_password_in_url(self):
+        # Smarter's SqlConnection logs its connection string with the password already masked.
+        line = (
+            "smarter.apps.connection.receivers.sql_connection_success() "
+            "django.db.backends.mysql://smarter:******@smarter-mariadb:3306/smarter_test_db is READY"
+        )
+        counts: collections.Counter = collections.Counter()
+        self.assertEqual(redact(line, counts), line)
+        self.assertEqual(counts, {})
+
+    def test_redact_finds_password_in_url(self):
+        counts: collections.Counter = collections.Counter()
+        text = redact("mysql://smarter:p4ss@db:3306/smarter and mysql://smarter:p4**@db/", counts)
+        self.assertEqual(
+            text,
+            "mysql://<redacted:password-in-url>@db:3306/smarter and mysql://<redacted:password-in-url>@db/",
+        )
+        self.assertEqual(counts, {"password-in-url": 2})
+
     def test_redact_still_finds_values(self):
         counts: collections.Counter = collections.Counter()
         text = redact(
