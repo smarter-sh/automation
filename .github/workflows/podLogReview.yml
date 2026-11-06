@@ -108,7 +108,7 @@ on:
         description: "The most issues to open."
         required: false
         type: string
-        default: "5"
+        default: "10"
       max-comments:
         description: "The most comments to add to existing issues."
         required: false
@@ -118,12 +118,12 @@ on:
         description: "The most issues to close."
         required: false
         type: string
-        default: "5"
+        default: "10"
       max-pull-requests:
         description: "The most fix pull requests to open. 0 turns them off."
         required: false
         type: string
-        default: "2"
+        default: "10"
       max-budget-usd:
         description: "The most that Claude Code may spend on this run, in US dollars."
         required: false
