@@ -100,7 +100,10 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
     #
     # The user and password in a url; the host stays:
     #   mysql://smarter:s3cret@db:3306/ -> mysql://<redacted:password-in-url>@db:3306/
-    ("password-in-url", re.compile(r"://(?P<value>[^:/\s@]+:[^@\s/]+)@")),
+    # A password that starts with "*" is already masked and stays, e.g. the
+    # mysql://smarter:******@db:3306/ that Smarter's SqlConnection.get_connection_string() logs.
+    # Alloy's url rule, in smarter-sh/smarter's helm/charts/smarter/values.yaml, skips it the same way.
+    ("password-in-url", re.compile(r"://(?P<value>[^:/\s@]+:[^@\s/*][^@\s/]*)@")),
     #
     # The value after a word such as Bearer, token or api_key, if it is 16 or more characters and
     # not a Python call (see NOT_A_CALL):
