@@ -2,17 +2,18 @@
 #------------------------------------------------------------------------------
 # Did You Know? of the day.
 #
-# Posts the fact of the day, from @smarter/didyouknow (smarter-sh/smarter's
-# smarter/react/packages/smarter-didyouknow), to The Smarter Project's
+# Posts the fact of the day, from @smarter/didyouknow (smarter-sh/smarter-console's
+# packages/smarter-didyouknow), to The Smarter Project's
 # #general Slack channel, once a day. It is the same fact that the web
 # console's Did you know? widget and smarter.sh show that day: the fact
 # changes at midnight UTC, so the time of the run doesn't change which one.
 #
-# - smarter-sh/smarter is checked out into smarter/. Its npm run slack:fact
+# - smarter-sh/smarter-console, the web console's repository, is checked out
+#   into console/. Its npm run slack:fact
 #   bundles the package's scripts/slack-fact-of-the-day.ts from source with
 #   esbuild and prints the message; this repository's scripts/slack_post.py
 #   posts it.
-# - Runs use the facts on smarter's default branch (main). By hand, it can
+# - Runs use the facts on smarter-console's default branch (main). By hand, it can
 #   print the message without posting it (dry-run).
 # - GitHub can start a scheduled run late, at busy times by an hour or more.
 #
@@ -51,11 +52,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Checkout smarter
+      - name: Checkout smarter-console
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: smarter-sh/smarter
-          path: smarter
+          repository: smarter-sh/smarter-console
+          path: console
           persist-credentials: false
 
       - name: Install Node
@@ -63,10 +64,10 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: smarter/smarter/react/package-lock.json
+          cache-dependency-path: console/package-lock.json
 
       - name: npm ci
-        working-directory: smarter/smarter/react
+        working-directory: console
         run: npm ci --include=dev
 
       - name: Post the fact of the day to Slack
@@ -77,5 +78,5 @@ jobs:
           DRY_RUN: ${{ inputs.dry-run && '--dry-run' || '' }}
         run: |
           set -o pipefail
-          npm run --silent --prefix smarter/smarter/react/packages/smarter-didyouknow slack:fact \
+          npm run --silent --prefix console/packages/smarter-didyouknow slack:fact \
             | python3 -I scripts/slack_post.py --channel "$SLACK_CHANNEL" ${DRY_RUN:+"$DRY_RUN"}
