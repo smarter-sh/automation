@@ -11,7 +11,10 @@ code against it (see the ``smarter-project-repositories`` skill):
 - ``smarter-python``, ``smarter-nodejs`` and ``smarter-golang``, the SDKs, which also generate
   their SAM models from the schemas,
 - ``smarter-cli``, whose contract test checks each command against the OpenAPI document,
-- ``smarter-vscode-yaml``, the VS Code extension, which bundles the schemas and examples.
+- ``smarter-vscode-yaml``, the VS Code extension, which bundles the schemas and examples,
+- ``smarter-console``, the web console, which copies the JSON Schemas of the backend's console endpoints and
+  generates its TypeScript types from them. It is checked at ``main``, which its matrix entry names: it has no
+  ``alpha`` branch.
 
 A copy goes stale whenever a platform release changes the contract, and nothing tells the
 repository. This script, run once per repository by the workflow, finds out, and opens the
