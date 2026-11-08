@@ -117,6 +117,6 @@ You can't run a workflow locally. Say so in your summary, and give the user the 
 
 Local checkouts sit next to this one: `../smarter` (the platform; its `scripts/` and `skills/` hold code several
 jobs used before they moved here), `../smarter-cli`, `../smarter-python`, `../smarter-nodejs`, `../smarter-golang`,
-`../smarter-vscode-yaml`, `../example-manifests`, `../stackademy`, `../extensions-registry`. Read them to learn how a
+`../smarter-vscode-yaml`, `../smarter-console`, `../example-manifests`, `../stackademy`, `../extensions-registry`. Read them to learn how a
 repository builds and tests, so a job does exactly what that repository's own CI does. Don't change them as part of
 a task here unless the user asks.

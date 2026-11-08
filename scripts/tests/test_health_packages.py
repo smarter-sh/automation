@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 from health import packages as health_packages
-from tests.health_fixtures import REPOSITORY
+from tests.health_fixtures import REPOSITORY, api_error
 
 
 class TestPackageDiscovery(unittest.TestCase):
@@ -53,6 +53,74 @@ class TestPackageDiscovery(unittest.TestCase):
             unpublished_candidates = health_packages.package_candidates(REPOSITORY, root, "v1.0.0", "no release step")
         self.assertEqual(private_candidates, [])
         self.assertEqual(unpublished_candidates, [])
+
+    def test_discovers_public_npm_workspace_packages_without_a_version(self):
+        root = [{"name": "package.json"}, {"name": "packages", "type": "dir"}]
+        manifests = {
+            "package.json": json.dumps({"name": "console", "private": True, "workspaces": ["packages/*"]}),
+            "packages/chat/package.json": json.dumps(
+                {"name": "@smarter.sh/ui-chat", "publishConfig": {"access": "public"}}
+            ),
+            "packages/common/package.json": json.dumps({"name": "@smarter/common", "private": True}),
+        }
+        folder = [
+            {"path": "packages/chat", "type": "dir"},
+            {"path": "packages/common", "type": "dir"},
+            {"path": "packages/no-manifest", "type": "dir"},
+            {"path": "packages/README.md", "type": "file"},
+        ]
+
+        def manifest(_repository, path):
+            if path not in manifests:
+                raise api_error(404)
+            return manifests[path]
+
+        with (
+            mock.patch.object(health_packages, "manifest_value", side_effect=manifest),
+            mock.patch.object(health_packages, "api_pages", return_value=folder) as pages,
+        ):
+            candidates = health_packages.package_candidates(REPOSITORY, root, "v1.0.18", "npm publish")
+        pages.assert_called_once_with(f"repos/{REPOSITORY}/contents/packages")
+        self.assertEqual(
+            candidates,
+            [
+                {
+                    "ecosystem": "npm",
+                    "name": "@smarter.sh/ui-chat",
+                    "repository": REPOSITORY,
+                    "expected_version": None,
+                }
+            ],
+        )
+
+    def test_workspace_folder_patterns(self):
+        yarn_manifest = json.dumps({"workspaces": {"packages": ["packages/*"]}})
+        self.assertEqual(health_packages.workspace_folders(yarn_manifest), ["packages/*"])
+        self.assertEqual(health_packages.workspace_folders(json.dumps({"name": "x"})), [])
+        self.assertEqual(health_packages.workspace_package_paths(REPOSITORY, "tools/cli/"), ["tools/cli"])
+        self.assertEqual(health_packages.workspace_package_paths(REPOSITORY, "packages/**"), [])
+
+    def test_workspace_package_skips_the_release_comparison_but_installs(self):
+        results = health_packages.new_results("packages")
+        candidate = {"ecosystem": "npm", "name": "@smarter.sh/ui-chat", "expected_version": None}
+        with (
+            mock.patch.object(health_packages, "registry_version", return_value="1.0.3"),
+            mock.patch.object(health_packages, "install_package") as install,
+        ):
+            health_packages.check_package(results, REPOSITORY, candidate)
+        install.assert_called_once_with("npm", "@smarter.sh/ui-chat", "1.0.3")
+        self.assertEqual(results["findings"], [])
+
+    def test_root_package_still_reports_a_version_mismatch(self):
+        results = health_packages.new_results("packages")
+        candidate = {"ecosystem": "npm", "name": "sample-package", "expected_version": "1.2.3"}
+        with (
+            mock.patch.object(health_packages, "registry_version", return_value="1.2.0"),
+            mock.patch.object(health_packages, "install_package"),
+        ):
+            health_packages.check_package(results, REPOSITORY, candidate)
+        categories = [finding["category"] for finding in results["findings"]]
+        self.assertEqual(categories, ["npm version mismatch"])
 
     def test_registry_latest_stable_versions(self):
         metadata = {
