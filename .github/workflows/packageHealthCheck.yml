@@ -8,6 +8,11 @@
 # GitHub release, then tests npm/PyPI installs or downloads the Go module.
 # Findings go to #general; package scripts are disabled during npm installs.
 #
+# The public npm packages of a repository's npm workspaces (smarter-console's
+# packages/*: @smarter.sh/ui-chat, @smarter.sh/ui-widgets) are tested for
+# install only. A monorepo publishes each one only when it changed, so its npm
+# version doesn't follow the repository's release tag.
+#
 # The logic is in scripts/health/organization_health.py, whose tests are in scripts/tests.
 #
 # Secrets:

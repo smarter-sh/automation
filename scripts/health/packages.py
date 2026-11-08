@@ -249,6 +249,10 @@ def go_module_name(go_mod_text: str) -> str | None:
 def package_candidates(repository: str, root_items: list[dict], release_tag: str, workflow_text: str) -> list[dict]:
     """Discover published npm, PyPI, and Go module packages from manifests and release workflows.
 
+    A package in an npm workspace (e.g. smarter-console's ``packages/*``) is found too. Its
+    ``expected_version`` is ``None``: a monorepo publishes each package only when it changed, so
+    its npm version doesn't follow the repository's release tag.
+
     :param repository: The package repository's ``owner/name`` identifier.
     :param root_items: Entries returned by the repository's root contents endpoint.
     :param release_tag: Its latest stable GitHub release tag.
@@ -260,12 +264,14 @@ def package_candidates(repository: str, root_items: list[dict], release_tag: str
     """
     file_names = {item.get("name") for item in root_items}
     candidates = []
+    workspace_candidates = []
 
     if "package.json" in file_names:
         package_text = manifest_value(repository, "package.json")
         package_name = published_npm_package_name(package_text, workflow_text)
         if package_name:
             candidates.append({"ecosystem": "npm", "name": package_name})
+        workspace_candidates = workspace_package_candidates(repository, package_text, workflow_text)
 
     publishes_to_pypi = re.search(PYPI_PUBLISH_PATTERN, workflow_text, re.I) is not None
     if "pyproject.toml" in file_names and publishes_to_pypi:
@@ -284,6 +290,79 @@ def package_candidates(repository: str, root_items: list[dict], release_tag: str
     for candidate in candidates:
         candidate["repository"] = repository
         candidate["expected_version"] = expected_version
+    for candidate in workspace_candidates:
+        candidate["repository"] = repository
+        candidate["expected_version"] = None
+        candidates.append(candidate)
+    return candidates
+
+
+def workspace_folders(package_text: str) -> list[str]:
+    """Return the folders that a root ``package.json``'s ``workspaces`` names, as globs or paths.
+
+    :param package_text: The contents of the repository's root ``package.json``.
+    :returns: The patterns, e.g. ``["packages/*"]``, or an empty list if it has no workspaces.
+    :raises json.JSONDecodeError: If the package manifest is invalid JSON.
+    """
+    package = json.loads(package_text)
+    if not isinstance(package, dict):
+        return []
+    workspaces = package.get("workspaces")
+    # Yarn also allows {"packages": [...]}.
+    if isinstance(workspaces, dict):
+        workspaces = workspaces.get("packages")
+    if not isinstance(workspaces, list):
+        return []
+    return [pattern for pattern in workspaces if isinstance(pattern, str)]
+
+
+def workspace_package_paths(repository: str, pattern: str) -> list[str]:
+    """List the folders that one workspace pattern matches.
+
+    Only a plain folder (``tools/cli``) or a folder's direct subfolders (``packages/*``) are
+    understood; any other glob is skipped.
+
+    :param repository: The repository's ``owner/name`` identifier.
+    :param pattern: One ``workspaces`` entry.
+    :returns: The repository-relative folders.
+    :raises subprocess.CalledProcessError: If GitHub cannot list the folder.
+    """
+    if not pattern.endswith("/*"):
+        if "*" in pattern:
+            return []
+        return [pattern.strip("/")]
+    parent = pattern.removesuffix("/*")
+    if "*" in parent:
+        return []
+    encoded_parent = quote(parent, safe="/")
+    entries = api_pages(f"repos/{repository}/contents/{encoded_parent}")
+    return [entry["path"] for entry in entries if entry.get("type") == "dir"]
+
+
+def workspace_package_candidates(repository: str, package_text: str, workflow_text: str) -> list[dict]:
+    """Find the public npm packages that a repository's npm workspaces publish.
+
+    :param repository: The repository's ``owner/name`` identifier.
+    :param package_text: The contents of the repository's root ``package.json``.
+    :param workflow_text: The combined source of its GitHub Actions workflows.
+    :returns: An ``npm`` candidate for each published workspace package, without versions.
+    :raises subprocess.CalledProcessError: If GitHub cannot list a folder or return a manifest.
+    :raises json.JSONDecodeError: If a package manifest is invalid JSON.
+    """
+    candidates = []
+    for pattern in workspace_folders(package_text):
+        for folder in workspace_package_paths(repository, pattern):
+            manifest_path = quote(f"{folder}/package.json", safe="/")
+            try:
+                workspace_text = manifest_value(repository, manifest_path)
+            except subprocess.CalledProcessError as error:
+                # A folder without a package.json isn't a package.
+                if http_status(error) == "404":
+                    continue
+                raise
+            package_name = published_npm_package_name(workspace_text, workflow_text)
+            if package_name:
+                candidates.append({"ecosystem": "npm", "name": package_name})
     return candidates
 
 
@@ -430,7 +509,7 @@ def released_package_candidates(repository: str, item: dict, root: list[dict]) -
 
 
 def check_package(results: dict, repository: str, candidate: dict) -> None:
-    """Compare one package's registry version with its release, and try to install it.
+    """Compare one package's registry version with its release, if it has one, and try to install it.
 
     :param results: The mutable scan results.
     :param repository: The repository's ``owner/name`` identifier.
@@ -450,11 +529,13 @@ def check_package(results: dict, repository: str, candidate: dict) -> None:
         detail = f"Could not read `{name}` registry metadata ({status})."
         add_finding(results, repository, f"{ecosystem} registry", detail, releases_url)
         return
-    available_version = normalized_version(available)
-    expected_version = normalized_version(expected)
-    if available_version != expected_version:
-        detail = f"`{name}` latest registry version is `{available}`; latest stable GitHub release is `{expected}`."
-        add_finding(results, repository, f"{ecosystem} version mismatch", detail, releases_url)
+    # A workspace package has no expected version: see package_candidates.
+    if expected is not None:
+        available_version = normalized_version(available)
+        expected_version = normalized_version(expected)
+        if available_version != expected_version:
+            detail = f"`{name}` latest registry version is `{available}`; latest stable GitHub release is `{expected}`."
+            add_finding(results, repository, f"{ecosystem} version mismatch", detail, releases_url)
     try:
         install_package(ecosystem, name, available)
     except (OSError, subprocess.CalledProcessError) as error:
