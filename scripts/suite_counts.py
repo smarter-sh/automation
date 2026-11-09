@@ -18,7 +18,15 @@ PHPUnit            ``OK (26 tests, 68 assertions)``, or
                    ``Tests: 49, Assertions: 131, Failures: 2, Skipped: 1.``
 go test -v         ``--- PASS: TestGet (0.00s)`` or ``--- FAIL: ...``,
                    one line per test
+brew test-bot      ``==> brew audit ...``, one line per step, then
+                   ``==> FAILED`` under a step that failed
 =================  ==================================================
+
+``brew test-bot`` (homebrew-tap) has no summary line: it prints each step's command, and
+``FAILED`` after a step that failed (``Step#puts_command`` and ``Step#puts_result`` in
+Homebrew/brew's ``Library/Homebrew/test_bot/step.rb``). Its checks of the tap and its
+formulae (:data:`TEST_BOT_TESTS`: brew style, readall, audit, and on pull requests the
+formula's install and test) count as tests; its setup and cleanup steps don't.
 
 A skipped test isn't counted as run. ``go test -v`` also prints a line for each subtest
 (``--- PASS: TestGet/not_found``); only the top-level tests count, one per ``func Test...``.
@@ -52,6 +60,18 @@ JAVASCRIPT_TESTS = re.compile(r"^Tests:?\s+(.*\d+ (?:passed|failed).*)$")
 NODE_COUNT = re.compile(r"^(?:#|ℹ) (pass|fail) (\d+)$")
 MOCHA_COUNT = re.compile(r"^(\d+) (passing|failing)\b")
 GO_TEST_RESULT = re.compile(r"^--- (PASS|FAIL): (\S+) \(")
+
+TEST_BOT_PHASE = re.compile(r"^==> Running (\w+)#run!$")
+"""The line where ``brew test-bot`` starts a phase, e.g. ``==> Running TapSyntax#run!``."""
+
+TEST_BOT_TESTS = ("TapSyntax", "Formulae", "FormulaeDependents")
+"""The ``brew test-bot`` phases whose steps check the tap: the others set up and clean up."""
+
+TEST_BOT_STEP = "==> brew "
+"""How a ``brew test-bot`` step's line starts, e.g. ``==> brew style smarter-sh/tap``."""
+
+TEST_BOT_FAILED = "==> FAILED"
+"""The line that ``brew test-bot`` prints after a step that failed."""
 
 SUBTEST_SEPARATOR = "/"
 """In a ``go test -v`` result's test name, the sign of a subtest, e.g. ``TestGet/not_found``."""
@@ -258,9 +278,37 @@ def unittest_counts(line: str, ran: int) -> Counts | None:
     return Counts(run=run, passed=run - failed)
 
 
+def test_bot_counts(text: str) -> Counts | None:
+    """
+    Count the steps of ``brew test-bot`` that check the tap, in the phases of :data:`TEST_BOT_TESTS`.
+
+    :param text: The job's whole log.
+    :returns: The counts, or None when the log has no such step.
+    """
+    total = Counts()
+    found = False
+    in_tests = False
+    for raw_line in text.splitlines():
+        line = clean_line(raw_line)
+        phase = TEST_BOT_PHASE.match(line)
+        if phase:
+            in_tests = phase.group(1) in TEST_BOT_TESTS
+            continue
+        if not in_tests:
+            continue
+        if line.startswith(TEST_BOT_STEP):
+            total.add(Counts(run=1, passed=1))
+            found = True
+        elif line == TEST_BOT_FAILED:
+            total.passed -= 1
+    if not found:
+        return None
+    return total
+
+
 def count_log(text: str) -> Counts | None:
     """
-    Count the tests in one job's log, adding up every summary in it.
+    Count the tests in one job's log, adding up every summary in it, and ``brew test-bot``'s steps.
 
     :param text: The job's whole log.
     :returns: The counts, or None when the log has no summary, or repeats other jobs' counts
@@ -268,6 +316,23 @@ def count_log(text: str) -> Counts | None:
     """
     if MERGED_REPORT in text:
         return None
+    summaries = summary_counts(text)
+    test_bot = test_bot_counts(text)
+    if test_bot is None:
+        return summaries
+    if summaries is None:
+        return test_bot
+    summaries.add(test_bot)
+    return summaries
+
+
+def summary_counts(text: str) -> Counts | None:
+    """
+    Count the tests in one job's log, from the test runners' summaries (see the module's table).
+
+    :param text: The job's whole log.
+    :returns: The counts, or None when the log has no summary.
+    """
     total = Counts()
     found = False
     ran = None
