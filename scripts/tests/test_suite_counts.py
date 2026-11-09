@@ -93,6 +93,26 @@ class TestCountLog(unittest.TestCase):
         )
         self.assertEqual(count_log(text), Counts(run=2, passed=1))
 
+    def test_brew_test_bot(self):
+        text = log(
+            "\x1b[35m==>\x1b[0m \x1b[1mRunning Setup#run!\x1b[0m",
+            "==> brew config",
+            "==> brew doctor",
+            "All steps passed!",
+            "==> Running TapSyntax#run!",
+            "==> brew style smarter-sh/tap",
+            "==> brew readall --aliases --os=all --arch=all smarter-sh/tap",
+            "==> FAILED",
+            "==> brew audit --except=installed --tap=smarter-sh/tap",
+            "Error: 1 failed step!",
+            "==> Running CleanupAfter#run!",
+            "==> brew cleanup --prune-prefix",
+        )
+        self.assertEqual(count_log(text), Counts(run=3, passed=2))
+
+    def test_brew_test_bot_setup_only(self):
+        self.assertIsNone(count_log(log("==> Running Setup#run!", "==> brew doctor", "All steps passed!")))
+
     def test_no_count(self):
         text = log("ok  \tgithub.com/smarter-sh/smarter-golang\t2.343s\tcoverage: 97.0% of statements")
         self.assertIsNone(count_log(text))
