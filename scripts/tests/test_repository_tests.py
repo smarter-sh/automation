@@ -195,6 +195,68 @@ class TestWait(unittest.TestCase):
         self.assertEqual(results[0].status, "success")
 
 
+PYTEST_LOG = "2026-11-08T15:09:08.5Z ===== 70 passed in 0.58s =====\n"
+UNITTEST_LOG = "2026-11-08T15:09:08.5Z Ran 12 tests in 0.1s\n2026-11-08T15:09:08.5Z FAILED (failures=2)\n"
+LINT_LOG = "2026-11-08T15:09:08.5Z check yaml........Passed\n"
+
+
+class TestCount(unittest.TestCase):
+    """Count_all() reads the job logs of every completed run, and adds up their counts."""
+
+    JOBS = [
+        {"id": 1, "conclusion": "success"},
+        {"id": 2, "conclusion": "failure"},
+        {"id": 3, "conclusion": "skipped"},
+        {"id": 4, "conclusion": "success"},
+    ]
+    LOGS = {1: PYTEST_LOG, 2: UNITTEST_LOG, 3: PYTEST_LOG, 4: LINT_LOG}
+
+    def fake_run(self, *args, strip=True):
+        self.assertIn("--allow-escape-sequences", args)
+        job_id = int(args[-1].split("/")[-2])
+        return self.LOGS[job_id]
+
+    def count(self, results, jobs=None, run=None):
+        jobs_answer = jobs if jobs is not None else self.JOBS
+        with (
+            mock.patch.object(tests, "api_pages", return_value=jobs_answer) as api_pages,
+            mock.patch.object(tests, "run", run or self.fake_run),
+            redirect_stdout(io.StringIO()),
+            mock.patch("sys.stderr", io.StringIO()),
+        ):
+            tests.count_all(results)
+        return api_pages
+
+    def test_adds_up_jobs(self):
+        result = tests.Result("smarter-sh/a", "t", "main", run_id=9, status="failure")
+        api_pages = self.count([result])
+        api_pages.assert_called_once_with("repos/smarter-sh/a/actions/runs/9/jobs?filter=latest", key="jobs")
+        self.assertEqual(result.tests_run, 82)
+        self.assertEqual(result.tests_passed, 80)
+
+    def test_no_count(self):
+        result = tests.Result("smarter-sh/a", "t", "main", run_id=9, status="success")
+        self.count([result], jobs=[{"id": 4, "conclusion": "success"}])
+        self.assertIsNone(result.tests_run)
+        self.assertIsNone(result.tests_passed)
+
+    def test_skips_runs_without_logs(self):
+        results = [
+            tests.Result("smarter-sh/a", "t", "main", run_id=9, status="waiting"),
+            tests.Result("smarter-sh/b", "t", "main", status="not_started"),
+        ]
+        api_pages = self.count(results)
+        api_pages.assert_not_called()
+
+    def test_log_error_leaves_count_unknown(self):
+        def failing_run(*args, strip=True):
+            raise subprocess.CalledProcessError(1, list(args), stderr="HTTP 410: gone")
+
+        result = tests.Result("smarter-sh/a", "t", "main", run_id=9, status="success")
+        self.count([result], run=failing_run)
+        self.assertIsNone(result.tests_run)
+
+
 class TestReport(unittest.TestCase):
     """The summary and the Slack message, and the exit code."""
 
@@ -212,10 +274,39 @@ class TestReport(unittest.TestCase):
         self.assertIn("1 of 3 test suites passed", message)
         self.assertIn(":x: smarter-sh/a: failed (<https://x/1|run>)", message)
         self.assertIn("not started: HTTP 422", message)
-        self.assertNotIn("smarter-sh/c", message)
+        self.assertNotIn("smarter-sh/c:", message)
         summary = tests.summary_markdown(results, RUN_URL)
-        self.assertIn("1 of 3 passed", summary)
-        self.assertIn("| smarter-sh/a | test.yml | main |", summary)
+        self.assertIn("1 of 3 suites passed", summary)
+        self.assertIn("| smarter-sh/a | - | - | :x: failed |", summary)
+
+    def test_counts_table(self):
+        results = [
+            tests.Result("smarter-sh/a", "t", "main", url="u", status="success", tests_run=7339, tests_passed=7339),
+            tests.Result("smarter-sh/bb", "t", "main", url="u", status="failure", tests_run=266, tests_passed=264),
+            tests.Result("smarter-sh/c", "t", "main", url="u", status="success"),
+        ]
+        message = tests.slack_message(results, RUN_URL)
+        lines = message.splitlines()
+        self.assertEqual(lines[0], ":x: *Repository tests: 2 of 3 test suites passed*")
+        self.assertEqual(lines[1], "```")
+        self.assertEqual(lines[2], "Repository  Tests run  Passed")
+        self.assertEqual(lines[3], "a               7,339   7,339  ✅")
+        self.assertEqual(lines[4], "bb                266     264  ❌")
+        self.assertEqual(lines[5], "c                   -       -  ✅")
+        self.assertEqual(lines[7], "Total           7,605   7,603  ❌")
+        self.assertEqual(lines[8], "```")
+        self.assertIn("no test count", message)
+        summary = tests.summary_markdown(results, RUN_URL)
+        self.assertIn("| smarter-sh/a | 7,339 | 7,339 | :white_check_mark: passed |", summary)
+        self.assertIn("| **Total** | **7,605** | **7,603** | :x: 2 of 3 suites passed | |", summary)
+        self.assertIn("no test count", summary)
+
+    def test_counts_table_all_passed(self):
+        results = [tests.Result("smarter-sh/a", "t", "main", status="success", tests_run=5, tests_passed=5)]
+        message = tests.slack_message(results, RUN_URL)
+        self.assertTrue(message.startswith(":white_check_mark: *Repository tests: all 1 test suites passed*"))
+        self.assertIn("Total               5       5  ✅", message)
+        self.assertNotIn("no test count", message)
 
     def test_dry_run(self):
         results = [
@@ -234,7 +325,7 @@ class TestReport(unittest.TestCase):
         ]
         self.assertIn("all 1 test suites passed", tests.slack_message(results, RUN_URL))
         summary = tests.summary_markdown(results, RUN_URL)
-        self.assertIn("1 of 1 passed", summary)
+        self.assertIn("1 of 1 suites passed", summary)
         self.assertNotIn("| smarter-sh/b |", summary)
         self.assertIn("Not tested, 2 repositories without a test workflow", summary)
         self.assertIn("ci.yml", summary)

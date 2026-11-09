@@ -4,9 +4,13 @@
 #
 # Every night, starts the test workflow (.github/workflows/tests.yml, test.yml,
 # ci.yml or checks.yml, the first one found) of every smarter-sh repository
-# that isn't archived, on its default branch, waits for every run, and posts
-# the results to Slack: a clean bill of health, or the suites that failed, with
-# links to their runs. A repository without a test workflow isn't tested, and
+# that isn't archived, on its default branch, waits for every run, reads each
+# run's job logs to count the tests run and passed, and posts the results to
+# Slack: one row per repository (tests run, passed, a check mark or a red X),
+# a total, and links to the suites that failed. Every job of a run counts, so a
+# suite run on five Python versions counts five times; a log without a test
+# count (go test without -v, checks only) shows "-" in the table. The counting
+# is in scripts/suite_counts.py. A repository without a test workflow isn't tested, and
 # is listed on the run's page only; one whose workflow is disabled, or has no
 # workflow_dispatch trigger, is reported as not started.
 #

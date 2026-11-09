@@ -36,8 +36,9 @@ def run(*args: str, check: bool = True, input_text: str | None = None, strip: bo
     :raises subprocess.CalledProcessError: When ``check`` is True and the command exits with a
         status other than 0. Its ``stderr`` holds the command's error message.
     """
+    # errors="replace": a job's log, read with gh api, may hold bytes that aren't UTF-8.
     completed = subprocess.run(  # nosec B603: fixed commands, arguments are never interpreted by a shell
-        list(args), check=check, capture_output=True, text=True, input=input_text
+        list(args), check=check, capture_output=True, text=True, errors="replace", input=input_text
     )
     if strip:
         return completed.stdout.strip()

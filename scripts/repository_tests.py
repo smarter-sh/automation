@@ -16,11 +16,18 @@ Usage::
   workflow (``.github/workflows/tests.yml``, ``test.yml``, ``ci.yml`` or ``checks.yml``, the first
   one found; see :data:`WORKFLOW_FILES`), starts it
   with a ``workflow_dispatch`` event on the repository's default branch (or ``--ref``), then polls
-  every run until it completes, or until ``--timeout-minutes``. It writes one :class:`Result` per
-  repository, as a JSON list. A dry run lists the workflows it would start, and starts none.
-- ``report`` appends one Markdown table to the run's page, and prints one Slack message: every
-  suite passed, or the ones that failed, with links. It exits with 1 when a suite failed, timed
-  out or couldn't be started.
+  every run until it completes, or until ``--timeout-minutes``. Then it reads every job log of each
+  completed run, and counts the tests that ran and passed (see ``suite_counts.py``). It writes one
+  :class:`Result` per repository, as a JSON list. A dry run lists the workflows it would start, and
+  starts none.
+- ``report`` appends one Markdown table to the run's page, and prints one Slack message: one row
+  per repository, with its tests run and passed, a check mark or a red X, and a total; then the
+  suites that failed, with links. It exits with 1 when a suite failed, timed out or couldn't be
+  started.
+
+The counts add up every job of a run: a suite that runs on five Python versions counts five times,
+and a suite split into shards counts each shard once. A repository whose log has no count (``go
+test`` without ``-v``, or a workflow that only lints or builds) shows ``-``.
 
 A repository without a test workflow isn't tested, and isn't counted, but the run's page lists it,
 so that a suite under another name doesn't go unnoticed. One whose workflow is disabled, or has no
@@ -35,8 +42,9 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from github_cli import ORGANIZATION, error_line, repositories, run_json
+from github_cli import ORGANIZATION, api_pages, error_line, repositories, run, run_json
 from result_files import load_results, save_results
+from suite_counts import Counts, count_log
 
 WORKFLOW_FILES = (
     ".github/workflows/tests.yml",
@@ -70,6 +78,25 @@ The first six
 are GitHub's own conclusions of a completed run.
 """
 
+STATUS_SYMBOL = {
+    ":white_check_mark:": "✅",
+    ":x:": "❌",
+    ":warning:": "⚠️",
+    ":hourglass_flowing_sand:": "⏳",
+    ":grey_question:": "❔",
+    ":information_source:": "ℹ️",
+}
+"""The emoji of :data:`STATUS_TEXT` as characters, for the Slack table: Slack doesn't read ``:x:`` in a code block."""
+
+NO_COUNT = "-"
+"""What the reports show for a repository whose log has no test count."""
+
+COUNTED_STATUSES = ("success", "failure", "cancelled", "timed_out")
+"""The conclusions of a run whose job logs are read for the test counts."""
+
+LOG_JOB_CONCLUSIONS = ("success", "failure")
+"""The conclusions of a job whose log is read: a skipped or cancelled job ran no tests."""
+
 CLOCK_MARGIN = timedelta(minutes=1)
 """How far before the dispatch request a run may say it was created: a runner's clock can be ahead of GitHub's."""
 
@@ -102,6 +129,10 @@ class Result:
     status: str = "not_started"
     #: Why the run wasn't started, or empty.
     reason: str = ""
+    #: The tests the run's jobs ran, or None when their logs have no count.
+    tests_run: int | None = None
+    #: The tests that passed, or None when the logs have no count.
+    tests_passed: int | None = None
 
     @property
     def failed(self) -> bool:
@@ -314,32 +345,119 @@ def _poll(result: Result) -> bool:
     return True
 
 
+def count_all(results: list[Result]) -> None:
+    """
+    Count the tests of every run that completed.
+
+    :param results: The results. Those whose :attr:`Result.status` is one of
+        :data:`COUNTED_STATUSES` get their :attr:`Result.tests_run` and :attr:`Result.tests_passed`.
+    """
+    for result in results:
+        if not result.run_id:
+            continue
+        if result.status not in COUNTED_STATUSES:
+            continue
+        count_tests(result)
+
+
+def count_tests(result: Result) -> None:
+    """
+    Count the tests of one run, adding up the summaries in every job's log.
+
+    A log that can't be read leaves the counts unknown, rather than too low.
+
+    :param result: The repository's result, with a :attr:`Result.run_id`. Its :attr:`Result.tests_run`
+        and :attr:`Result.tests_passed` are set, or left None when no log has a count.
+    """
+    try:
+        total = _run_counts(result)
+    except subprocess.CalledProcessError as error:
+        print(f"{result.repository}: couldn't count the tests: {error_line(error)}", file=sys.stderr)
+        return
+    except ValueError as error:
+        print(f"{result.repository}: couldn't count the tests: {error}", file=sys.stderr)
+        return
+    if total is None:
+        print(f"{result.repository}: no test count in the logs")
+        return
+    result.tests_run = total.run
+    result.tests_passed = total.passed
+    print(f"{result.repository}: {total.run} tests run, {total.passed} passed")
+
+
+def _run_counts(result: Result) -> Counts | None:
+    """
+    Add up the counts of every job of a run that passed or failed.
+
+    :param result: The repository's result, with a :attr:`Result.run_id`.
+    :returns: The counts, or None when no job's log has one.
+    :raises subprocess.CalledProcessError: When ``gh`` fails.
+    :raises ValueError: When GitHub's list of jobs isn't one.
+    """
+    jobs_endpoint = f"repos/{result.repository}/actions/runs/{result.run_id}/jobs?filter=latest"
+    jobs = api_pages(jobs_endpoint, key="jobs")
+    total = None
+    for job in jobs:
+        if job.get("conclusion") not in LOG_JOB_CONCLUSIONS:
+            continue
+        counts = _job_counts(result.repository, job["id"])
+        if counts is None:
+            continue
+        if total is None:
+            total = Counts()
+        total.add(counts)
+    return total
+
+
+def _job_counts(repository: str, job_id: int) -> Counts | None:
+    """
+    Read one job's log, and count its tests.
+
+    :param repository: The repository, as ``owner/name``.
+    :param job_id: The job's id.
+    :returns: The counts, or None when the log has none.
+    :raises subprocess.CalledProcessError: When ``gh`` fails.
+    """
+    # gh refuses to print text with terminal color codes, which test runners' logs are full of, without this flag.
+    log = run("gh", "api", "--allow-escape-sequences", f"repos/{repository}/actions/jobs/{job_id}/logs", strip=False)
+    return count_log(log)
+
+
 def summary_markdown(results: list[Result], run_url: str) -> str:
     """
     Write the run's job summary.
 
-    One table row per repository that has a test workflow, then a line that lists the ones that have none.
+    One table row per repository that has a test workflow, with its tests run and passed, and a
+    total row; then a line that lists the repositories that have none.
 
     :param results: Every repository's result.
     :param run_url: The workflow run's url.
     :returns: The summary, in GitHub Markdown.
     """
     suites = tested(results)
-    passed = sum(1 for result in suites if result.status == "success")
+    passed = suites_passed(suites)
     lines = [
-        f"## Repository tests: {passed} of {len(suites)} passed",
+        f"## Repository tests: {len(passed)} of {len(suites)} suites passed",
         "",
-        "| Repository | Workflow | Branch | Result | Run |",
-        "| --- | --- | --- | --- | --- |",
+        "| Repository | Tests run | Passed | Result | Run |",
+        "| --- | ---: | ---: | --- | --- |",
     ]
     for result in suites:
         text, emoji = _status_words(result.status)
         reason = f" ({result.reason})" if result.reason else ""
         run_link = f"[run]({result.url})" if result.url else ""
-        workflow_file = _file_name(result.workflow)
-        lines.append(f"| {result.repository} | {workflow_file} | {result.ref} | {emoji} {text}{reason} | {run_link} |")
-    if not suites:
+        tests_run = _count_text(result.tests_run)
+        tests_passed = _count_text(result.tests_passed)
+        lines.append(f"| {result.repository} | {tests_run} | {tests_passed} | {emoji} {text}{reason} | {run_link} |")
+    if suites:
+        total_run, total_passed = count_totals(suites)
+        total_emoji = _total_emoji(suites)
+        total_result = f"{total_emoji} {len(passed)} of {len(suites)} suites passed"
+        lines.append(f"| **Total** | **{total_run:,}** | **{total_passed:,}** | {total_result} | |")
+    else:
         lines.append("| (no repository has a test workflow) | | | | |")
+    if _has_missing_count(suites):
+        lines += ["", f"{NO_COUNT}: the run's logs have no test count (`go test` without `-v`, or checks only)."]
     skipped = untested(results)
     if skipped:
         names = ", ".join(result.repository for result in skipped)
@@ -357,32 +475,177 @@ def slack_message(results: list[Result], run_url: str) -> str:
     """
     Write the run's one Slack message, in Slack's mrkdwn.
 
-    Every suite passed, or one line per repository that didn't, then a count of the ones that did.
-    Repositories without a test workflow are left out: the run's page lists them.
+    A headline, then a table in a code block: one row per repository, with its tests run and
+    passed and a check mark or a red X, and a total row. Then one line per suite that didn't pass,
+    with a link to its run. Repositories without a test workflow are left out: the run's page
+    lists them.
 
     :param results: Every repository's result.
     :param run_url: The workflow run's url.
     :returns: The message.
     """
     results = tested(results)
-    passed = [result for result in results if result.status == "success"]
     would_start = [result for result in results if result.status == "would_start"]
     if would_start:
         return _dry_run_slack_message(results, len(would_start), run_url)
-    if results and len(passed) == len(results):
-        return f":white_check_mark: *Repository tests: all {len(results)} test suites passed.* <{run_url}|The run>"
-    lines = [f"*Repository tests: {len(passed)} of {len(results)} test suites passed*"]
+    if not results:
+        return f"*Repository tests*\n:warning: No repository has a test workflow.\n<{run_url}|The run>"
+    passed = suites_passed(results)
+    headline_emoji = _total_emoji(results)
+    if len(passed) == len(results):
+        headline = f"all {len(results)} test suites passed"
+    else:
+        headline = f"{len(passed)} of {len(results)} test suites passed"
+    lines = [f"{headline_emoji} *Repository tests: {headline}*"]
+    lines += _slack_table(results)
+    lines += _slack_failures(results)
+    if _has_missing_count(results):
+        lines.append(f"_{NO_COUNT}: the run's logs have no test count_")
+    lines.append(f"<{run_url}|The run>")
+    return "\n".join(lines)
+
+
+def _slack_table(results: list[Result]) -> list[str]:
+    """
+    Write the Slack message's table: one row per repository, and a total row, in a code block.
+
+    The emoji go last on each row, so that the numbers line up whatever width Slack gives an emoji.
+
+    :param results: The results of the repositories that have a test workflow.
+    :returns: The table's lines, with the code block's fences.
+    """
+    rows = []
     for result in results:
-        if result in passed:
+        name = _short_name(result.repository)
+        tests_run = _count_text(result.tests_run)
+        tests_passed = _count_text(result.tests_passed)
+        _, emoji = _status_words(result.status)
+        symbol = STATUS_SYMBOL.get(emoji, "❔")
+        rows.append((name, tests_run, tests_passed, symbol))
+    total_run, total_passed = count_totals(results)
+    total_emoji = _total_emoji(results)
+    total_symbol = STATUS_SYMBOL[total_emoji]
+    total_row = ("Total", f"{total_run:,}", f"{total_passed:,}", total_symbol)
+    header = ("Repository", "Tests run", "Passed", "")
+
+    all_rows = [header] + rows + [total_row]
+    name_width = max(len(row[0]) for row in all_rows)
+    run_width = max(len(row[1]) for row in all_rows)
+    passed_width = max(len(row[2]) for row in all_rows)
+    rule = "-" * (name_width + run_width + passed_width + 4)
+
+    lines = ["```"]
+    for row in [header] + rows:
+        lines.append(_table_line(row, name_width, run_width, passed_width))
+    lines.append(rule)
+    lines.append(_table_line(total_row, name_width, run_width, passed_width))
+    lines.append("```")
+    return lines
+
+
+def _table_line(row: tuple[str, str, str, str], name_width: int, run_width: int, passed_width: int) -> str:
+    """
+    Write one row of the Slack table, the name left-aligned and the numbers right-aligned.
+
+    :param row: ``(name, tests run, passed, emoji)``.
+    :param name_width: The name column's width.
+    :param run_width: The tests run column's width.
+    :param passed_width: The passed column's width.
+    :returns: The line, without trailing spaces.
+    """
+    name, tests_run, tests_passed, symbol = row
+    line = f"{name:<{name_width}}  {tests_run:>{run_width}}  {tests_passed:>{passed_width}}  {symbol}"
+    return line.rstrip()
+
+
+def _slack_failures(results: list[Result]) -> list[str]:
+    """
+    Write one line per suite that didn't pass: what happened, and a link to its run.
+
+    :param results: The results of the repositories that have a test workflow.
+    :returns: The lines, none when every suite passed.
+    """
+    lines = []
+    for result in results:
+        if result.status == "success":
             continue
         text, emoji = _status_words(result.status)
         reason = f": {result.reason}" if result.reason else ""
         link = f" (<{result.url}|run>)" if result.url else ""
         lines.append(f"{emoji} {result.repository}: {text}{reason}{link}")
-    if not results:
-        lines.append(":warning: No repository has a test workflow.")
-    lines.append(f"<{run_url}|The run>")
-    return "\n".join(lines)
+    return lines
+
+
+def suites_passed(results: list[Result]) -> list[Result]:
+    """
+    Keep the repositories whose suite passed.
+
+    :param results: The results.
+    :returns: The results whose status is ``success``.
+    """
+    return [result for result in results if result.status == "success"]
+
+
+def count_totals(results: list[Result]) -> tuple[int, int]:
+    """
+    Add up the tests run and passed of every repository that has a count.
+
+    :param results: The results.
+    :returns: ``(tests run, tests passed)``.
+    """
+    total_run = 0
+    total_passed = 0
+    for result in results:
+        if result.tests_run is not None:
+            total_run += result.tests_run
+        if result.tests_passed is not None:
+            total_passed += result.tests_passed
+    return total_run, total_passed
+
+
+def _total_emoji(results: list[Result]) -> str:
+    """
+    Choose the total row's emoji: a check mark when every suite passed, a red X otherwise.
+
+    :param results: The results of the repositories that have a test workflow.
+    :returns: ``:white_check_mark:`` or ``:x:``.
+    """
+    passed = suites_passed(results)
+    if results and len(passed) == len(results):
+        return ":white_check_mark:"
+    return ":x:"
+
+
+def _has_missing_count(results: list[Result]) -> bool:
+    """
+    Tell whether a repository's row shows :data:`NO_COUNT`.
+
+    :param results: The results of the repositories that have a test workflow.
+    :returns: Whether any of them has no test count.
+    """
+    return any(result.tests_run is None for result in results)
+
+
+def _count_text(number: int | None) -> str:
+    """
+    Write a test count for a report, e.g. ``7,379``.
+
+    :param number: The count, or None when it is unknown.
+    :returns: The count with thousands separators, or :data:`NO_COUNT`.
+    """
+    if number is None:
+        return NO_COUNT
+    return f"{number:,}"
+
+
+def _short_name(repository: str) -> str:
+    """
+    Take a repository's name without its owner, to keep the Slack table narrow.
+
+    :param repository: The repository, e.g. ``smarter-sh/smarter-cli``.
+    :returns: Its name, e.g. ``smarter-cli``.
+    """
+    return repository.rsplit("/", 1)[-1]
 
 
 def _dry_run_slack_message(results: list[Result], would_start: int, run_url: str) -> str:
@@ -489,7 +752,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _run(args: argparse.Namespace) -> int:
     """
-    Start every test workflow, wait for the runs, and save the results.
+    Start every test workflow, wait for the runs, count their tests, and save the results.
 
     :param args: The ``run`` subcommand's arguments.
     :returns: The exit code: 0, or 1 when the repositories couldn't be listed.
@@ -502,6 +765,9 @@ def _run(args: argparse.Namespace) -> int:
         return 1
     save(results, args.output)
     wait_all(results, args.timeout_minutes, args.poll_seconds)
+    # saved first, so that the report has the conclusions even if counting is cut short.
+    save(results, args.output)
+    count_all(results)
     save(results, args.output)
     return 0
 
