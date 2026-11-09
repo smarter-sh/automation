@@ -27,7 +27,15 @@ Usage::
 
 The counts add up every job of a run: a suite that runs on five Python versions counts five times,
 and a suite split into shards counts each shard once. A repository whose log has no count (``go
-test`` without ``-v``, or a workflow that only lints or builds) shows ``-``.
+test`` without ``-v``, or a workflow that only lints or builds) shows ``-``. One whose logs GitHub
+wouldn't serve, even after :data:`LOG_ATTEMPTS` tries, shows ``?``.
+
+A run can skip its test jobs when the repository's own workflow finds that the code was already
+tested: smarter skips its Python shards when an earlier run passed on the same files, and
+smarter-console skips its tests when a push changed no testable file. The skipped jobs' tests are
+then counted from the run that last ran them: the newest earlier run of the same workflow, on the
+same branch, not a pull request's, in which every skipped job ran (see :func:`earlier_tested_run`).
+So the counts are the same whether a suite ran tonight or was skipped.
 
 A repository without a test workflow isn't tested, and isn't counted, but the run's page lists it,
 so that a suite under another name doesn't go unnoticed. One whose workflow is disabled, or has no
@@ -36,13 +44,14 @@ maintainer's decision, not a fix.
 """
 
 import argparse
+import re
 import subprocess  # nosec B404: only for CalledProcessError
 import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from github_cli import ORGANIZATION, api_pages, error_line, repositories, run, run_json
+from github_cli import ORGANIZATION, api_pages, error_line, http_status, repositories, run, run_json
 from result_files import load_results, save_results
 from suite_counts import Counts, count_log
 
@@ -91,11 +100,26 @@ STATUS_SYMBOL = {
 NO_COUNT = "-"
 """What the reports show for a repository whose log has no test count."""
 
+UNREAD_COUNT = "?"
+"""What the reports show for a repository whose logs couldn't be read: its count is unknown."""
+
+LOG_ATTEMPTS = 3
+"""How many times a job's log is asked for, when GitHub answers with a server error."""
+
+LOG_RETRY_SECONDS = 20
+"""How long to wait before asking for a job's log again: GitHub's 5xx answers usually pass in seconds."""
+
 COUNTED_STATUSES = ("success", "failure", "cancelled", "timed_out")
 """The conclusions of a run whose job logs are read for the test counts."""
 
 LOG_JOB_CONCLUSIONS = ("success", "failure")
 """The conclusions of a job whose log is read: a skipped or cancelled job ran no tests."""
+
+EARLIER_RUNS = 30
+"""How many earlier runs of a workflow are looked at for the one that last ran its skipped jobs."""
+
+EXPRESSION = re.compile(r"\$\{\{.*?\}\}")
+"""An expression in a job's name, e.g. ``${{ matrix.shard }}``: GitHub leaves it there when it skips the job."""
 
 CLOCK_MARGIN = timedelta(minutes=1)
 """How far before the dispatch request a run may say it was created: a runner's clock can be ahead of GitHub's."""
@@ -133,6 +157,10 @@ class Result:
     tests_run: int | None = None
     #: The tests that passed, or None when the logs have no count.
     tests_passed: int | None = None
+    #: Why the run's logs couldn't be read, e.g. ``HTTP 503``, or empty.
+    count_error: str = ""
+    #: The page of the earlier run whose logs gave the skipped jobs' counts, or empty.
+    counts_from: str = ""
 
     @property
     def failed(self) -> bool:
@@ -345,36 +373,42 @@ def _poll(result: Result) -> bool:
     return True
 
 
-def count_all(results: list[Result]) -> None:
+def count_all(results: list[Result], sleep=time.sleep) -> None:
     """
     Count the tests of every run that completed.
 
     :param results: The results. Those whose :attr:`Result.status` is one of
         :data:`COUNTED_STATUSES` get their :attr:`Result.tests_run` and :attr:`Result.tests_passed`.
+    :param sleep: ``time.sleep``, which the tests replace.
     """
     for result in results:
         if not result.run_id:
             continue
         if result.status not in COUNTED_STATUSES:
             continue
-        count_tests(result)
+        count_tests(result, sleep)
 
 
-def count_tests(result: Result) -> None:
+def count_tests(result: Result, sleep=time.sleep) -> None:
     """
     Count the tests of one run, adding up the summaries in every job's log.
 
-    A log that can't be read leaves the counts unknown, rather than too low.
+    A log that can't be read leaves the counts unknown, rather than too low, and sets
+    :attr:`Result.count_error`.
 
     :param result: The repository's result, with a :attr:`Result.run_id`. Its :attr:`Result.tests_run`
         and :attr:`Result.tests_passed` are set, or left None when no log has a count.
+    :param sleep: ``time.sleep``, which the tests replace.
     """
     try:
-        total = _run_counts(result)
+        total = _run_counts(result, sleep)
     except subprocess.CalledProcessError as error:
+        status = http_status(error)
+        result.count_error = f"HTTP {status}"
         print(f"{result.repository}: couldn't count the tests: {error_line(error)}", file=sys.stderr)
         return
     except ValueError as error:
+        result.count_error = "unexpected answer from GitHub"
         print(f"{result.repository}: couldn't count the tests: {error}", file=sys.stderr)
         return
     if total is None:
@@ -385,22 +419,71 @@ def count_tests(result: Result) -> None:
     print(f"{result.repository}: {total.run} tests run, {total.passed} passed")
 
 
-def _run_counts(result: Result) -> Counts | None:
+def _run_counts(result: Result, sleep) -> Counts | None:
     """
-    Add up the counts of every job of a run that passed or failed.
+    Add up the counts of every job of a run that passed or failed, and of the jobs it skipped.
 
-    :param result: The repository's result, with a :attr:`Result.run_id`.
+    :param result: The repository's result, with a :attr:`Result.run_id`. Its
+        :attr:`Result.counts_from` is set when the skipped jobs were counted from an earlier run.
+    :param sleep: ``time.sleep``, which the tests replace.
     :returns: The counts, or None when no job's log has one.
     :raises subprocess.CalledProcessError: When ``gh`` fails.
     :raises ValueError: When GitHub's list of jobs isn't one.
     """
-    jobs_endpoint = f"repos/{result.repository}/actions/runs/{result.run_id}/jobs?filter=latest"
-    jobs = api_pages(jobs_endpoint, key="jobs")
+    jobs = run_jobs(result.repository, result.run_id)
+    total = _jobs_counts(result.repository, jobs, sleep)
+    skipped = skipped_job_names(jobs)
+    if not skipped or result.status != "success":
+        return total
+    earlier = earlier_tested_run(result, skipped)
+    if earlier is None:
+        print(f"{result.repository}: no earlier run ran the skipped jobs: {', '.join(skipped)}")
+        return total
+    earlier_run, earlier_jobs = earlier
+    result.counts_from = earlier_run.get("html_url", "")
+    print(f"{result.repository}: counting the skipped jobs from {result.counts_from}")
+    tested_jobs = []
+    for job in earlier_jobs:
+        if _matches_any(job.get("name", ""), skipped):
+            tested_jobs.append(job)
+    earlier_counts = _jobs_counts(result.repository, tested_jobs, sleep)
+    if earlier_counts is None:
+        return total
+    if total is None:
+        return earlier_counts
+    total.add(earlier_counts)
+    return total
+
+
+def run_jobs(repository: str, run_id: int) -> list[dict]:
+    """
+    List the jobs of a run's latest attempt.
+
+    :param repository: The repository, as ``owner/name``.
+    :param run_id: The run's id.
+    :returns: GitHub's jobs, each with its ``id``, ``name`` and ``conclusion``.
+    :raises subprocess.CalledProcessError: When ``gh`` fails.
+    :raises ValueError: When GitHub's list of jobs isn't one.
+    """
+    endpoint = f"repos/{repository}/actions/runs/{run_id}/jobs?filter=latest"
+    return api_pages(endpoint, key="jobs")
+
+
+def _jobs_counts(repository: str, jobs: list[dict], sleep) -> Counts | None:
+    """
+    Add up the counts of the jobs that passed or failed.
+
+    :param repository: The repository, as ``owner/name``.
+    :param jobs: The jobs, from :func:`run_jobs`.
+    :param sleep: ``time.sleep``, which the tests replace.
+    :returns: The counts, or None when no job's log has one.
+    :raises subprocess.CalledProcessError: When ``gh`` fails.
+    """
     total = None
     for job in jobs:
         if job.get("conclusion") not in LOG_JOB_CONCLUSIONS:
             continue
-        counts = _job_counts(result.repository, job["id"])
+        counts = _job_counts(repository, job["id"], sleep)
         if counts is None:
             continue
         if total is None:
@@ -409,18 +492,171 @@ def _run_counts(result: Result) -> Counts | None:
     return total
 
 
-def _job_counts(repository: str, job_id: int) -> Counts | None:
+def skipped_job_names(jobs: list[dict]) -> list[str]:
+    """
+    Name the jobs that a run skipped.
+
+    :param jobs: The run's jobs, from :func:`run_jobs`.
+    :returns: Their names, as GitHub shows them, e.g. ``python (shard ${{ matrix.shard }} of 8)``.
+    """
+    names = []
+    for job in jobs:
+        if job.get("conclusion") == "skipped":
+            names.append(job.get("name", ""))
+    return names
+
+
+def _job_name_pattern(skipped_name: str) -> re.Pattern:
+    """
+    Match the names that a skipped job has in a run where it ran.
+
+    A skipped matrix job keeps its name's expressions, ``python (shard ${{ matrix.shard }} of 8)``,
+    or has no matrix values at all, ``test``; where it ran, it is ``python (shard 3 of 8)`` or
+    ``test (1)``.
+
+    :param skipped_name: The skipped job's name.
+    :returns: A pattern that matches the whole name of each of the job's runs.
+    """
+    parts = EXPRESSION.split(skipped_name)
+    escaped_parts = [re.escape(part) for part in parts]
+    name_pattern = ".+".join(escaped_parts)
+    return re.compile(f"{name_pattern}(?: \\(.+\\))?")
+
+
+def _matches_any(job_name: str, skipped_names: list[str]) -> bool:
+    """
+    Tell whether a job is one of the skipped ones.
+
+    :param job_name: The job's name, in an earlier run.
+    :param skipped_names: The skipped jobs' names, from :func:`skipped_job_names`.
+    :returns: Whether it matches one of them.
+    """
+    for skipped_name in skipped_names:
+        pattern = _job_name_pattern(skipped_name)
+        if pattern.fullmatch(job_name):
+            return True
+    return False
+
+
+def _ran_every_job(jobs: list[dict], skipped_names: list[str]) -> bool:
+    """
+    Tell whether a run ran every one of the jobs that another run skipped.
+
+    :param jobs: The run's jobs, from :func:`run_jobs`.
+    :param skipped_names: The skipped jobs' names.
+    :returns: Whether each skipped job passed or failed in this run.
+    """
+    for skipped_name in skipped_names:
+        pattern = _job_name_pattern(skipped_name)
+        ran = False
+        for job in jobs:
+            name_matches = pattern.fullmatch(job.get("name", "")) is not None
+            if name_matches and job.get("conclusion") in LOG_JOB_CONCLUSIONS:
+                ran = True
+        if not ran:
+            return False
+    return True
+
+
+def earlier_tested_run(result: Result, skipped_names: list[str]) -> tuple[dict, list[dict]] | None:
+    """
+    Find the run that last ran the jobs that a run skipped.
+
+    A repository's workflow skips its tests when it finds the code already tested, by an earlier
+    run on the same branch: smarter keeps a pass marker per branch in its Actions cache, and
+    smarter-console compares a push with the one before it. So the newest earlier run of the same
+    workflow and branch that ran every skipped job tested the same code. A pull request's run is
+    left out: it tests the merge with its base branch, not the branch.
+
+    :param result: The repository's result, whose run skipped the jobs.
+    :param skipped_names: The skipped jobs' names, from :func:`skipped_job_names`.
+    :returns: ``(run, its jobs)``, or None when none of the last :data:`EARLIER_RUNS` runs ran them.
+    :raises subprocess.CalledProcessError: When ``gh`` fails.
+    """
+    workflow_file = _file_name(result.workflow)
+    endpoint = (
+        f"repos/{result.repository}/actions/workflows/{workflow_file}/runs"
+        f"?branch={result.ref}&status=completed&per_page={EARLIER_RUNS}"
+    )
+    answer = run_json("gh", "api", endpoint) or {}
+    runs = answer.get("workflow_runs") or []
+    for run_item in runs:
+        if not _is_earlier_branch_run(run_item, result.run_id):
+            continue
+        jobs = run_jobs(result.repository, run_item["id"])
+        if _ran_every_job(jobs, skipped_names):
+            return run_item, jobs
+    return None
+
+
+def _is_earlier_branch_run(run_item: dict, run_id: int) -> bool:
+    """
+    Tell whether a run may have tested a later run's code: it came before, and wasn't a pull request's.
+
+    :param run_item: One of GitHub's ``workflow_runs``.
+    :param run_id: The later run's id. Run ids grow with time.
+    :returns: Whether it is an earlier run of the branch itself, that completed with a verdict.
+    """
+    if run_item.get("id", 0) >= run_id:
+        return False
+    if run_item.get("event") == "pull_request":
+        return False
+    return run_item.get("conclusion") in LOG_JOB_CONCLUSIONS
+
+
+def _job_counts(repository: str, job_id: int, sleep) -> Counts | None:
     """
     Read one job's log, and count its tests.
 
     :param repository: The repository, as ``owner/name``.
     :param job_id: The job's id.
+    :param sleep: ``time.sleep``, which the tests replace.
     :returns: The counts, or None when the log has none.
-    :raises subprocess.CalledProcessError: When ``gh`` fails.
+    :raises subprocess.CalledProcessError: When ``gh`` fails, or GitHub still answers with a
+        server error after :data:`LOG_ATTEMPTS` tries.
     """
-    # gh refuses to print text with terminal color codes, which test runners' logs are full of, without this flag.
-    log = run("gh", "api", "--allow-escape-sequences", f"repos/{repository}/actions/jobs/{job_id}/logs", strip=False)
+    log = _read_job_log(repository, job_id, sleep)
     return count_log(log)
+
+
+def _read_job_log(repository: str, job_id: int, sleep) -> str:
+    """
+    Download one job's log, and ask again when GitHub answers with a server error.
+
+    :param repository: The repository, as ``owner/name``.
+    :param job_id: The job's id.
+    :param sleep: ``time.sleep``, which the tests replace.
+    :returns: The log.
+    :raises subprocess.CalledProcessError: When ``gh`` fails for another reason, or on the last try.
+    """
+    endpoint = f"repos/{repository}/actions/jobs/{job_id}/logs"
+    attempt = 1
+    while True:
+        try:
+            # without this flag, gh refuses to print text with terminal color codes, which logs are full of.
+            return run("gh", "api", "--allow-escape-sequences", endpoint, strip=False)
+        except subprocess.CalledProcessError as error:
+            is_last_attempt = attempt >= LOG_ATTEMPTS
+            if is_last_attempt or not _is_server_error(error):
+                raise
+            print(f"{repository}: job {job_id}'s log: {error_line(error)}, trying again", file=sys.stderr)
+        sleep(LOG_RETRY_SECONDS)
+        attempt += 1
+
+
+def _is_server_error(error: subprocess.CalledProcessError) -> bool:
+    """
+    Tell whether GitHub failed to serve a request, rather than refused it.
+
+    A dropped connection (``stream error``) has no HTTP status, and is worth another try too.
+
+    :param error: The failure that :func:`run` raised.
+    :returns: Whether the status is 5xx, or missing.
+    """
+    status = http_status(error)
+    if status == "unknown":
+        return True
+    return status.startswith("5")
 
 
 def summary_markdown(results: list[Result], run_url: str) -> str:
@@ -446,8 +682,7 @@ def summary_markdown(results: list[Result], run_url: str) -> str:
         text, emoji = _status_words(result.status)
         reason = f" ({result.reason})" if result.reason else ""
         run_link = f"[run]({result.url})" if result.url else ""
-        tests_run = _count_text(result.tests_run)
-        tests_passed = _count_text(result.tests_passed)
+        tests_run, tests_passed = _count_cells(result)
         lines.append(f"| {result.repository} | {tests_run} | {tests_passed} | {emoji} {text}{reason} | {run_link} |")
     if suites:
         total_run, total_passed = count_totals(suites)
@@ -458,6 +693,12 @@ def summary_markdown(results: list[Result], run_url: str) -> str:
         lines.append("| (no repository has a test workflow) | | | | |")
     if _has_missing_count(suites):
         lines += ["", f"{NO_COUNT}: the run's logs have no test count (`go test` without `-v`, or checks only)."]
+    unread = _unread_counts(suites)
+    if unread:
+        lines += ["", f"{UNREAD_COUNT}: GitHub wouldn't serve the run's logs, so its tests weren't counted: {unread}"]
+    earlier = _earlier_count_links(suites, markdown=True)
+    if earlier:
+        lines += ["", f"Tests skipped as already tested, counted from the run that ran them: {earlier}"]
     skipped = untested(results)
     if skipped:
         names = ", ".join(result.repository for result in skipped)
@@ -501,6 +742,12 @@ def slack_message(results: list[Result], run_url: str) -> str:
     lines += _slack_failures(results)
     if _has_missing_count(results):
         lines.append(f"_{NO_COUNT}: the run's logs have no test count_")
+    unread = _unread_counts(results)
+    if unread:
+        lines.append(f"_{UNREAD_COUNT}: GitHub wouldn't serve the run's logs: {unread}_")
+    earlier = _earlier_count_links(results, markdown=False)
+    if earlier:
+        lines.append(f"_Tests skipped as already tested, counted from the run that ran them: {earlier}_")
     lines.append(f"<{run_url}|The run>")
     return "\n".join(lines)
 
@@ -517,8 +764,7 @@ def _slack_table(results: list[Result]) -> list[str]:
     rows = []
     for result in results:
         name = _short_name(result.repository)
-        tests_run = _count_text(result.tests_run)
-        tests_passed = _count_text(result.tests_passed)
+        tests_run, tests_passed = _count_cells(result)
         _, emoji = _status_words(result.status)
         symbol = STATUS_SYMBOL.get(emoji, "❔")
         rows.append((name, tests_run, tests_passed, symbol))
@@ -623,7 +869,63 @@ def _has_missing_count(results: list[Result]) -> bool:
     :param results: The results of the repositories that have a test workflow.
     :returns: Whether any of them has no test count.
     """
-    return any(result.tests_run is None for result in results)
+    for result in results:
+        is_missing = result.tests_run is None
+        if is_missing and not result.count_error:
+            return True
+    return False
+
+
+def _unread_counts(results: list[Result]) -> str:
+    """
+    Name the repositories whose logs couldn't be read, and why, for a report's footnote.
+
+    :param results: The results of the repositories that have a test workflow.
+    :returns: E.g. ``cache-results (HTTP 503), smarter-golang (HTTP 503)``, or empty when every log was read.
+    """
+    names = []
+    for result in results:
+        if not result.count_error:
+            continue
+        name = _short_name(result.repository)
+        names.append(f"{name} ({result.count_error})")
+    return ", ".join(names)
+
+
+def _earlier_count_links(results: list[Result], markdown: bool) -> str:
+    """
+    Name the repositories whose skipped tests were counted from an earlier run, with a link to it.
+
+    :param results: The results of the repositories that have a test workflow.
+    :param markdown: Write GitHub Markdown links, or else Slack's.
+    :returns: E.g. ``smarter (run)``, the run a link, or empty when no count came from an earlier run.
+    """
+    links = []
+    for result in results:
+        if not result.counts_from:
+            continue
+        name = _short_name(result.repository)
+        if markdown:
+            link = f"[run]({result.counts_from})"
+        else:
+            link = f"<{result.counts_from}|run>"
+        links.append(f"{name} ({link})")
+    return ", ".join(links)
+
+
+def _count_cells(result: Result) -> tuple[str, str]:
+    """
+    Write a repository's tests run and passed for a report's table.
+
+    :param result: The repository's result.
+    :returns: ``(tests run, tests passed)``, each a number, :data:`NO_COUNT`, or
+        :data:`UNREAD_COUNT` when the logs couldn't be read.
+    """
+    if result.count_error:
+        return UNREAD_COUNT, UNREAD_COUNT
+    tests_run = _count_text(result.tests_run)
+    tests_passed = _count_text(result.tests_passed)
+    return tests_run, tests_passed
 
 
 def _count_text(number: int | None) -> str:

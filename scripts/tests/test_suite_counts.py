@@ -80,6 +80,19 @@ class TestCountLog(unittest.TestCase):
         text = log("FAILURES!", "Tests: 49, Assertions: 131, Failures: 2, Errors: 1, Skipped: 3.")
         self.assertEqual(count_log(text), Counts(run=46, passed=43))
 
+    def test_go_test_verbose(self):
+        text = log(
+            "=== RUN   TestGet",
+            "=== RUN   TestGet/not_found",
+            "    --- PASS: TestGet/not_found (0.00s)",
+            "--- PASS: TestGet (0.01s)",
+            "--- FAIL: TestDelete (0.00s)",
+            "--- SKIP: TestLive (0.00s)",
+            "PASS",
+            "ok  \tgithub.com/smarter-sh/smarter-cli/cmd\t0.1s\tcoverage: 90.5% of statements",
+        )
+        self.assertEqual(count_log(text), Counts(run=2, passed=1))
+
     def test_no_count(self):
         text = log("ok  \tgithub.com/smarter-sh/smarter-golang\t2.343s\tcoverage: 97.0% of statements")
         self.assertIsNone(count_log(text))

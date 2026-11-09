@@ -224,7 +224,7 @@ class TestCount(unittest.TestCase):
             redirect_stdout(io.StringIO()),
             mock.patch("sys.stderr", io.StringIO()),
         ):
-            tests.count_all(results)
+            tests.count_all(results, sleep=lambda _: None)
         return api_pages
 
     def test_adds_up_jobs(self):
@@ -255,6 +255,147 @@ class TestCount(unittest.TestCase):
         result = tests.Result("smarter-sh/a", "t", "main", run_id=9, status="success")
         self.count([result], run=failing_run)
         self.assertIsNone(result.tests_run)
+        self.assertEqual(result.count_error, "HTTP 410")
+
+    def test_server_error_retries(self):
+        answers = [
+            subprocess.CalledProcessError(1, ["gh"], stderr="gh: HTTP 503"),
+            subprocess.CalledProcessError(1, ["gh"], stderr="stream error: stream ID 1; CANCEL"),
+            PYTEST_LOG,
+        ]
+
+        def flaky_run(*args, strip=True):
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        result = tests.Result("smarter-sh/a", "t", "main", run_id=9, status="success")
+        self.count([result], jobs=[{"id": 1, "conclusion": "success"}], run=flaky_run)
+        self.assertEqual(result.tests_run, 70)
+        self.assertEqual(result.count_error, "")
+
+    def test_server_error_gives_up(self):
+        calls = []
+
+        def failing_run(*args, strip=True):
+            calls.append(args)
+            raise subprocess.CalledProcessError(1, list(args), stderr="gh: HTTP 503")
+
+        result = tests.Result("smarter-sh/a", "t", "main", run_id=9, status="success")
+        self.count([result], jobs=[{"id": 1, "conclusion": "success"}], run=failing_run)
+        self.assertEqual(len(calls), tests.LOG_ATTEMPTS)
+        self.assertIsNone(result.tests_run)
+        self.assertEqual(result.count_error, "HTTP 503")
+
+
+class TestEarlierRun(unittest.TestCase):
+    """A run that skipped its tests, as already tested, counts them from the run that last ran them."""
+
+    SKIPPED_RUN_JOBS = [
+        {"id": 1, "name": "fingerprint", "conclusion": "success"},
+        {"id": 2, "name": "slack-bot", "conclusion": "success"},
+        {"id": 3, "name": "python (shard ${{ matrix.shard }} of 2)", "conclusion": "skipped"},
+        {"id": 4, "name": "python-report", "conclusion": "success"},
+    ]
+    TESTED_RUN_JOBS = [
+        {"id": 11, "name": "slack-bot", "conclusion": "success"},
+        {"id": 12, "name": "python (shard 1 of 2)", "conclusion": "success"},
+        {"id": 13, "name": "python (shard 2 of 2)", "conclusion": "success"},
+        {"id": 14, "name": "python-report", "conclusion": "success"},
+    ]
+    LOGS = {
+        1: LINT_LOG,
+        2: UNITTEST_LOG,
+        4: LINT_LOG,
+        11: UNITTEST_LOG,
+        12: PYTEST_LOG,
+        13: PYTEST_LOG,
+        14: LINT_LOG,
+    }
+    RUNS = [
+        {"id": 90, "event": "workflow_dispatch", "conclusion": "success", "html_url": "later"},
+        {"id": 50, "event": "workflow_dispatch", "conclusion": "success", "html_url": "this"},
+        {"id": 40, "event": "pull_request", "conclusion": "success", "html_url": "pull request"},
+        {"id": 30, "event": "workflow_dispatch", "conclusion": "cancelled", "html_url": "cancelled"},
+        {"id": 20, "event": "workflow_dispatch", "conclusion": "success", "html_url": "also skipped"},
+        {"id": 10, "event": "push", "conclusion": "success", "html_url": "tested"},
+    ]
+
+    def setUp(self):
+        self.jobs_by_run = {50: self.SKIPPED_RUN_JOBS, 20: self.SKIPPED_RUN_JOBS, 10: self.TESTED_RUN_JOBS}
+        self.jobs_by_run[40] = self.TESTED_RUN_JOBS
+        self.runs_endpoints = []
+
+    def fake_pages(self, endpoint, key=None):
+        run_id = int(endpoint.split("/")[-2])
+        return self.jobs_by_run[run_id]
+
+    def fake_run(self, *args, strip=True):
+        job_id = int(args[-1].split("/")[-2])
+        return self.LOGS[job_id]
+
+    def fake_run_json(self, *args):
+        self.runs_endpoints.append(args[-1])
+        return {"workflow_runs": self.RUNS}
+
+    def count(self, result):
+        with (
+            mock.patch.object(tests, "api_pages", self.fake_pages),
+            mock.patch.object(tests, "run", self.fake_run),
+            mock.patch.object(tests, "run_json", self.fake_run_json),
+            redirect_stdout(io.StringIO()),
+        ):
+            tests.count_tests(result, sleep=lambda _: None)
+
+    def test_counts_skipped_jobs_from_earlier_run(self):
+        result = tests.Result("smarter-sh/a", ".github/workflows/test.yml", "main", run_id=50, status="success")
+        self.count(result)
+        # slack-bot from this run (12 run, 10 passed), the two shards from run 10 (70 each)
+        self.assertEqual(result.tests_run, 152)
+        self.assertEqual(result.tests_passed, 150)
+        self.assertEqual(result.counts_from, "tested")
+        expected = "repos/smarter-sh/a/actions/workflows/test.yml/runs?branch=main&status=completed&per_page=30"
+        self.assertEqual(self.runs_endpoints, [expected])
+
+    def test_same_counts_as_the_tested_run(self):
+        skipped = tests.Result("smarter-sh/a", ".github/workflows/test.yml", "main", run_id=50, status="success")
+        tested = tests.Result("smarter-sh/a", ".github/workflows/test.yml", "main", run_id=10, status="success")
+        self.count(skipped)
+        self.count(tested)
+        self.assertEqual(skipped.tests_run, tested.tests_run)
+        self.assertEqual(skipped.tests_passed, tested.tests_passed)
+        self.assertEqual(tested.counts_from, "")
+
+    def test_no_earlier_run_ran_them(self):
+        del self.jobs_by_run[10]
+        self.RUNS = [run for run in self.RUNS if run["id"] != 10]
+        result = tests.Result("smarter-sh/a", ".github/workflows/test.yml", "main", run_id=50, status="success")
+        self.count(result)
+        self.assertEqual(result.tests_run, 12)
+        self.assertEqual(result.counts_from, "")
+
+    def test_failed_run_isnt_looked_back_from(self):
+        result = tests.Result("smarter-sh/a", ".github/workflows/test.yml", "main", run_id=50, status="failure")
+        self.count(result)
+        self.assertEqual(result.tests_run, 12)
+        self.assertEqual(self.runs_endpoints, [])
+
+    def test_job_name_pattern(self):
+        matrix = ["python (shard ${{ matrix.shard }} of 8)"]
+        self.assertTrue(tests._matches_any("python (shard 3 of 8)", matrix))
+        self.assertFalse(tests._matches_any("python-report", matrix))
+        self.assertTrue(tests._matches_any("test (1)", ["test"]))
+        self.assertTrue(tests._matches_any("test", ["test"]))
+        self.assertFalse(tests._matches_any("tests", ["test"]))
+        self.assertFalse(tests._matches_any("report", ["test"]))
+
+    def test_report_links_the_earlier_run(self):
+        results = [
+            tests.Result("smarter-sh/a", "t", "main", status="success", tests_run=5, tests_passed=5, counts_from="u"),
+        ]
+        self.assertIn("counted from the run that ran them: a (<u|run>)", tests.slack_message(results, RUN_URL))
+        self.assertIn("counted from the run that ran them: a ([run](u))", tests.summary_markdown(results, RUN_URL))
 
 
 class TestReport(unittest.TestCase):
@@ -300,6 +441,19 @@ class TestReport(unittest.TestCase):
         self.assertIn("| smarter-sh/a | 7,339 | 7,339 | :white_check_mark: passed |", summary)
         self.assertIn("| **Total** | **7,605** | **7,603** | :x: 2 of 3 suites passed | |", summary)
         self.assertIn("no test count", summary)
+
+    def test_unread_count(self):
+        results = [
+            tests.Result("smarter-sh/a", "t", "main", url="u", status="success", count_error="HTTP 503"),
+            tests.Result("smarter-sh/b", "t", "main", url="u", status="success", tests_run=5, tests_passed=5),
+        ]
+        message = tests.slack_message(results, RUN_URL)
+        self.assertIn("\na                   ?       ?  ✅\n", message)
+        self.assertIn("GitHub wouldn't serve the run's logs: a (HTTP 503)", message)
+        self.assertNotIn("no test count", message)
+        summary = tests.summary_markdown(results, RUN_URL)
+        self.assertIn("| smarter-sh/a | ? | ? |", summary)
+        self.assertIn("a (HTTP 503)", summary)
 
     def test_counts_table_all_passed(self):
         results = [tests.Result("smarter-sh/a", "t", "main", status="success", tests_run=5, tests_passed=5)]
