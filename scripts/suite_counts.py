@@ -16,10 +16,14 @@ node --test        ``# pass 96`` and ``# fail 0`` (``ℹ pass 96`` with the spec
 mocha              ``40 passing (2s)`` and ``2 failing``
 PHPUnit            ``OK (26 tests, 68 assertions)``, or
                    ``Tests: 49, Assertions: 131, Failures: 2, Skipped: 1.``
+go test -v         ``--- PASS: TestGet (0.00s)`` or ``--- FAIL: ...``,
+                   one line per test
 =================  ==================================================
 
-A skipped test isn't counted as run. ``go test`` without ``-v`` prints no count, and a job that
-only lints or builds prints none either: such a log has no count at all.
+A skipped test isn't counted as run. ``go test -v`` also prints a line for each subtest
+(``--- PASS: TestGet/not_found``); only the top-level tests count, one per ``func Test...``.
+``go test`` without ``-v`` prints no count, and a job that only lints or builds prints none
+either: such a log has no count at all.
 
 A job that merges other jobs' reports (``vitest --merge-reports``) prints their counts a second
 time, so its log isn't counted.
@@ -47,6 +51,10 @@ PHPUNIT_TOTALS = re.compile(r"^Tests: (\d+), Assertions: \d+(.*)$")
 JAVASCRIPT_TESTS = re.compile(r"^Tests:?\s+(.*\d+ (?:passed|failed).*)$")
 NODE_COUNT = re.compile(r"^(?:#|ℹ) (pass|fail) (\d+)$")
 MOCHA_COUNT = re.compile(r"^(\d+) (passing|failing)\b")
+GO_TEST_RESULT = re.compile(r"^--- (PASS|FAIL): (\S+) \(")
+
+SUBTEST_SEPARATOR = "/"
+"""In a ``go test -v`` result's test name, the sign of a subtest, e.g. ``TestGet/not_found``."""
 
 NUMBER_AND_WORD = re.compile(r"(\d+) ([a-z]+)")
 """One count of a pytest, vitest or Jest summary, e.g. ``69 passed``."""
@@ -183,6 +191,21 @@ def _mocha(match: re.Match) -> Counts:
     return Counts(run=number)
 
 
+def _go_test(match: re.Match) -> Counts | None:
+    """
+    Count one test of ``go test -v``, ``--- PASS: TestGet (0.00s)`` or ``--- FAIL: TestGet (0.01s)``.
+
+    :param match: The match of :data:`GO_TEST_RESULT`.
+    :returns: The counts, or None for a subtest, which its parent test already counts.
+    """
+    test_name = match.group(2)
+    if SUBTEST_SEPARATOR in test_name:
+        return None
+    if match.group(1) == "PASS":
+        return Counts(run=1, passed=1)
+    return Counts(run=1)
+
+
 LINE_SUMMARIES = (
     (PYTEST_SUMMARY, _pytest),
     (PHPUNIT_OK, _phpunit_ok),
@@ -190,6 +213,7 @@ LINE_SUMMARIES = (
     (JAVASCRIPT_TESTS, _javascript),
     (NODE_COUNT, _node),
     (MOCHA_COUNT, _mocha),
+    (GO_TEST_RESULT, _go_test),
 )
 """The summaries that fit on one line, and how to count each.
 
@@ -202,7 +226,8 @@ def line_counts(line: str) -> Counts | None:
     Count a summary that fits on one line.
 
     :param line: A line of the log, cleaned by :func:`clean_line`.
-    :returns: The counts, or None when the line isn't one of :data:`LINE_SUMMARIES`.
+    :returns: The counts, or None when the line isn't one of :data:`LINE_SUMMARIES`, or is a
+        ``go test -v`` subtest.
     """
     for pattern, count in LINE_SUMMARIES:
         match = pattern.match(line)

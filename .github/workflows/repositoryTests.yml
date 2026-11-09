@@ -9,7 +9,12 @@
 # Slack: one row per repository (tests run, passed, a check mark or a red X),
 # a total, and links to the suites that failed. Every job of a run counts, so a
 # suite run on five Python versions counts five times; a log without a test
-# count (go test without -v, checks only) shows "-" in the table. The counting
+# count (go test without -v, checks only) shows "-" in the table, and one whose
+# logs GitHub wouldn't serve, after 3 tries, shows "?". A run that skipped its
+# test jobs as already tested (smarter's pass markers, smarter-console's
+# changed-files check) has them counted from the newest earlier run of the
+# same branch that ran them, so the counts don't depend on whether the suite
+# ran tonight. The counting
 # is in scripts/suite_counts.py. A repository without a test workflow isn't tested, and
 # is listed on the run's page only; one whose workflow is disabled, or has no
 # workflow_dispatch trigger, is reported as not started.
