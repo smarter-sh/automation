@@ -40,6 +40,70 @@ class TestWorkflowFindings(unittest.TestCase):
         categories = [category for category, _ in findings]
         self.assertEqual(categories, ["Unpinned action", "Token permissions", "Missing timeout"])
 
+    def test_job_write_with_reason_is_accepted(self):
+        source = (
+            "permissions:\n"
+            "  contents: read\n"
+            "jobs:\n"
+            "  publish:\n"
+            "    timeout-minutes: 5\n"
+            "    permissions:\n"
+            "      contents: read\n"
+            "      id-token: write # trusted publishing (OIDC)\n"
+            "    steps:\n"
+            "      - run: echo\n"
+            "        with:\n"
+            "          mode: write\n"
+        )
+        self.assertEqual(workflows.workflow_findings(source), [])
+
+    def test_job_write_without_reason_is_reported(self):
+        source = (
+            "permissions:\n"
+            "  contents: read\n"
+            "jobs:\n"
+            "  publish:\n"
+            "    timeout-minutes: 5\n"
+            "    permissions:\n"
+            "      id-token: write\n"
+        )
+        detail = "Job `publish` grants `id-token: write` without a comment that says why."
+        self.assertEqual(workflows.workflow_findings(source), [("Token permissions", detail)])
+
+    def test_workflow_level_write_with_reason_is_still_reported(self):
+        source = (
+            "permissions:\n"
+            "  contents: read\n"
+            "  issues: write # comments on issues\n"
+            "\n"
+            "jobs:\n"
+            "  test:\n"
+            "    timeout-minutes: 5\n"
+        )
+        self.assertEqual(
+            workflows.workflow_findings(source),
+            [("Token permissions", "The workflow grants write permissions to every job.")],
+        )
+
+    def test_write_all_is_reported(self):
+        source = "permissions: write-all\njobs:\n  test:\n    timeout-minutes: 5\n"
+        self.assertEqual(
+            workflows.workflow_findings(source),
+            [("Token permissions", "The workflow grants write-all permissions.")],
+        )
+
+    def test_reusable_workflow_call_needs_no_timeout(self):
+        source = (
+            "permissions:\n"
+            "  contents: read\n"
+            "jobs:\n"
+            "  ci:\n"
+            "    name: CI\n"
+            "    uses: ./.github/workflows/ci.yml\n"
+            "    secrets: inherit\n"
+        )
+        self.assertEqual(workflows.workflow_findings(source), [])
+
     def test_missing_permissions_are_reported(self):
         findings = workflows.workflow_findings("jobs:\n  test:\n    timeout-minutes: 5\n")
         self.assertIn(("Token permissions", "The workflow does not declare explicit token permissions."), findings)
