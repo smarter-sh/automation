@@ -75,8 +75,24 @@ def job_blocks(source: str) -> list[tuple[str, str]]:
     return blocks
 
 
+def workflow_permissions_block(source: str) -> str:
+    """Return the body of the workflow-level ``permissions:`` mapping.
+
+    :param source: The contents of one GitHub Actions workflow file.
+    :returns: The indented lines under a top-level ``permissions:`` key, or an empty string.
+    """
+    match = re.search(r"(?m)^permissions\s*:\s*(?:#.*)?\n((?:(?: {2,}.*)?\n)*)", source)
+    if not match:
+        return ""
+    return match.group(1)
+
+
 def permission_findings(source: str, blocks: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """Find missing token permissions and write permissions.
+
+    A write permission granted to the whole workflow is a finding, because every job gets it.
+    A write permission granted to one job is accepted when the same line says why in a comment
+    (``contents: write # pushes the release tag``), and is a finding otherwise.
 
     :param source: The contents of one GitHub Actions workflow file.
     :param blocks: The workflow's jobs, from :func:`job_blocks`.
@@ -88,11 +104,31 @@ def permission_findings(source: str, blocks: list[tuple[str, str]]) -> list[tupl
     every_job_has_permissions = bool(job_permissions) and all(job_permissions)
     if not has_workflow_permissions and not every_job_has_permissions:
         findings.append(("Token permissions", "The workflow does not declare explicit token permissions."))
-    if re.search(r"(?m)^permissions\s*:\s*write-all\s*$", source):
+    if re.search(r"(?m)^permissions\s*:\s*write-all\s*(?:#.*)?$", source):
         findings.append(("Token permissions", "The workflow grants write-all permissions."))
-    elif re.search(r"(?m)^ {2,}[A-Za-z_-]+\s*:\s*write\s*(?:#.*)?$", source):
-        findings.append(("Token permissions", "The workflow grants one or more write permissions."))
+    elif re.search(r"(?m)^ +[A-Za-z_-]+\s*:\s*write\b", workflow_permissions_block(source)):
+        findings.append(("Token permissions", "The workflow grants write permissions to every job."))
+    write_pattern = re.compile(r"(?m)^ +([A-Za-z_-]+)\s*:\s*write[ \t]*(#[ \t]*\S.*)?$")
+    for job_name, block in blocks:
+        if re.search(r"(?m)^ {4}permissions\s*:\s*write-all\b", block):
+            findings.append(("Token permissions", f"Job `{job_name}` grants write-all permissions."))
+        job_permissions_block = re.search(r"(?m)^ {4}permissions\s*:\s*(?:#.*)?\n((?:(?: {6,}.*)?\n)*)", block)
+        if not job_permissions_block:
+            continue
+        for scope, reason in write_pattern.findall(job_permissions_block.group(1)):
+            if not reason:
+                detail = f"Job `{job_name}` grants `{scope}: write` without a comment that says why."
+                findings.append(("Token permissions", detail))
     return findings
+
+
+def calls_reusable_workflow(block: str) -> bool:
+    """Check whether a job calls a reusable workflow, where GitHub doesn't allow ``timeout-minutes``.
+
+    :param block: The body of one job, from :func:`job_blocks`.
+    :returns: Whether the job has a job-level ``uses:`` key.
+    """
+    return re.search(r"(?m)^ {4}uses\s*:", block) is not None
 
 
 def workflow_findings(source: str) -> list[tuple[str, str]]:
@@ -105,6 +141,8 @@ def workflow_findings(source: str) -> list[tuple[str, str]]:
     findings = unpinned_action_findings(source)
     findings.extend(permission_findings(source, blocks))
     for job_name, block in blocks:
+        if calls_reusable_workflow(block):
+            continue
         if not re.search(r"(?m)^ {4}timeout-minutes\s*:", block):
             findings.append(("Missing timeout", f"Job `{job_name}` has no `timeout-minutes`."))
     return findings

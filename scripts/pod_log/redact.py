@@ -98,6 +98,11 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
     # the rest of the ARN stays.
     ("aws-account-id", re.compile(r"arn:aws:[\w-]+:[\w-]*:(?P<value>\d{12}):")),
     #
+    # The same account id as the first label of an ECR registry's hostname, in every image name
+    # of kubectl's output, e.g. describe.txt's Image: lines and images.txt; the rest stays:
+    #   123456789012.dkr.ecr.us-east-2.amazonaws.com/smarter:v1 -> <redacted:aws-account-id>.dkr.ecr.…
+    ("aws-account-id", re.compile(r"(?<![\w.-])(?P<value>\d{12})(?=\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com)")),
+    #
     # The user and password in a url; the host stays:
     #   mysql://smarter:s3cret@db:3306/ -> mysql://<redacted:password-in-url>@db:3306/
     # A password that starts with "*" is already masked and stays, e.g. the

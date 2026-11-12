@@ -103,6 +103,30 @@ class TestPodLogRedact(unittest.TestCase):
         )
         self.assertEqual(counts, {"secret": 3, "token": 1})
 
+    def test_redact_aws_account_id(self):
+        # kubectl's inventory holds the account id in the IRSA role's ARN and in every ECR image name
+        # (smarter-sh/smarter#981). Only the id is redacted.
+        account_id = "123456789012"
+        registry = account_id + ".dkr.ecr.us-east-2.amazonaws.com/smarter:v0.44.12"
+        lines = (
+            "      AWS_ROLE_ARN:  arn:aws:iam::" + account_id + ":role/smarter-irsa\n"
+            "    Image:         " + registry + "\n"
+            "2026-11-10T21:24:03Z 1 " + registry + "\n"
+        )
+        counts: collections.Counter = collections.Counter()
+        text = redact(lines, counts)
+        self.assertNotIn(account_id, text)
+        self.assertIn("arn:aws:iam::<redacted:aws-account-id>:role/smarter-irsa", text)
+        self.assertIn("Image:         <redacted:aws-account-id>.dkr.ecr.us-east-2.amazonaws.com/smarter:v0.44.12", text)
+        self.assertEqual(counts, {"aws-account-id": 3})
+
+    def test_redact_keeps_other_twelve_digit_numbers(self):
+        # a 12-digit number that is not in an ARN or an ECR hostname, e.g. a timestamp in ms, stays.
+        line = "took 123456789012 ms, and 1234567890123.dkr.ecr.us-east-2.amazonaws.com is not an account id"
+        counts: collections.Counter = collections.Counter()
+        self.assertEqual(redact(line, counts), line)
+        self.assertEqual(counts, {})
+
     def test_main_rewrites_logs_in_place(self):
         with tempfile.TemporaryDirectory() as folder:
             log = Path(folder) / "smarter" / "pod.log"
