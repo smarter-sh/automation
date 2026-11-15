@@ -22,7 +22,9 @@ instead.
   answer ends with the exact line ``Verdict: healthy`` (see
   :attr:`pod_log.review_stream.ReviewResult.healthy`), and ``pod_log/redact.py`` redacted
   nothing from the logs: Smarter's logs must not hold credentials or personal data, so a
-  redaction is a finding whatever Claude concluded. The message is a clean bill of health, whose facts
+  redaction is a finding whatever Claude concluded. The report's ``total`` counts findings only:
+  the AWS account id that kubectl prints in ``inventory/`` is expected, and doesn't count
+  (``pod_log.redact.EXPECTED``). The message is a clean bill of health, whose facts
   (pods, restarts, release) come from the kubectl inventory in ``--log-dir``. The verdict is the
   only thing taken from Claude, and it chooses between fixed texts, so nothing that Claude or the
   logs wrote reaches Slack.

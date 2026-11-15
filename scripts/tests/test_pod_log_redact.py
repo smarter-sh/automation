@@ -10,7 +10,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from pod_log.redact import REPORT_NAME, locate, main, read_report, redact
+from pod_log.redact import REPORT_NAME, is_expected, locate, main, read_report, redact
 
 
 class TestPodLogRedact(unittest.TestCase):
@@ -149,6 +149,7 @@ class TestPodLogRedact(unittest.TestCase):
                     "total": 1,
                     "kinds": {"email": 1},
                     "files": {"smarter/pod.log": {"email": {"count": 1, "lines": [1]}}},
+                    "expected": {"total": 0, "kinds": {}, "files": {}},
                 },
             )
             report_json = json.dumps(report)
@@ -165,7 +166,66 @@ class TestPodLogRedact(unittest.TestCase):
             with mock.patch.object(sys, "argv", ["pod_log/redact.py", folder]), redirect_stdout(output):
                 self.assertEqual(main(), 0)
             self.assertEqual(output.getvalue().strip(), "redacted 1 file(s): nothing")
-            self.assertEqual(read_report(folder), {"total": 0, "kinds": {}, "files": {}})
+            empty = {"total": 0, "kinds": {}, "files": {}}
+            self.assertEqual(read_report(folder), {**empty, "expected": empty})
+
+    def test_main_keeps_inventory_account_ids_out_of_the_findings(self):
+        # kubectl prints the account id in every ECR image name and the IRSA role's ARN
+        # (smarter-sh/smarter#1002): redacted, but expected, so not counted in "total".
+        account_id = "123456789012"
+        registry = account_id + ".dkr.ecr.us-east-2.amazonaws.com/smarter:v0.45.2"
+        with tempfile.TemporaryDirectory() as folder:
+            inventory = Path(folder) / "inventory"
+            inventory.mkdir()
+            images = inventory / "images.txt"
+            images.write_text("2026-11-13T22:04:55Z 3 " + registry + "\n", encoding="utf-8")
+            describe = inventory / "describe.txt"
+            describe.write_text(
+                "  Image:  " + registry + "\n  AWS_ROLE_ARN:  arn:aws:iam::" + account_id + ":role/irsa\n",
+                encoding="utf-8",
+            )
+            # the same kind in a pod's log, and another kind in the inventory, are still findings.
+            log = Path(folder) / "smarter" / "pod.log"
+            log.parent.mkdir()
+            log.write_text("assumed arn:aws:iam::" + account_id + ":role/irsa\n", encoding="utf-8")
+            (inventory / "events.txt").write_text("by someone@example.com\n", encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch.object(sys, "argv", ["pod_log/redact.py", folder]), redirect_stdout(output):
+                self.assertEqual(main(), 0)
+            self.assertNotIn(account_id, images.read_text(encoding="utf-8"), "expected ids are still redacted")
+            self.assertNotIn(account_id, describe.read_text(encoding="utf-8"))
+            report = read_report(folder)
+            self.assertEqual(report["total"], 2)
+            self.assertEqual(report["kinds"], {"aws-account-id": 1, "email": 1})
+            self.assertEqual(sorted(report["files"]), ["inventory/events.txt", "smarter/pod.log"])
+            expected = report["expected"]
+            self.assertEqual(expected["total"], 3)
+            self.assertEqual(expected["kinds"], {"aws-account-id": 3})
+            self.assertEqual(sorted(expected["files"]), ["inventory/describe.txt", "inventory/images.txt"])
+            printed = output.getvalue().splitlines()
+            self.assertEqual(printed[0], "redacted 4 file(s): aws-account-id 1, email 1")
+            self.assertEqual(printed[1], "expected, not findings: aws-account-id 3")
+            self.assertTrue(printed[2].startswith("::warning::2 redaction(s) in 2 log(s)"))
+
+    def test_main_does_not_warn_on_expected_placeholders_only(self):
+        with tempfile.TemporaryDirectory() as folder:
+            inventory = Path(folder) / "inventory"
+            inventory.mkdir()
+            text = "Image: 123456789012.dkr.ecr.us-east-2.amazonaws.com/smarter:v1\n"
+            (inventory / "describe.txt").write_text(text, encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch.object(sys, "argv", ["pod_log/redact.py", folder]), redirect_stdout(output):
+                self.assertEqual(main(), 0)
+            self.assertNotIn("::warning::", output.getvalue())
+            report = read_report(folder)
+            self.assertEqual(report["total"], 0, "a run with only expected placeholders can be healthy")
+            self.assertEqual(report["expected"]["total"], 1)
+
+    def test_is_expected(self):
+        self.assertTrue(is_expected("inventory/images.txt", "aws-account-id"))
+        self.assertFalse(is_expected("inventory/images.txt", "email"))
+        self.assertFalse(is_expected("smarter/pod.log", "aws-account-id"))
+        self.assertFalse(is_expected("images.txt", "aws-account-id"))
 
     def test_locate(self):
         text = "a\n<redacted:email> and <redacted:email>\nb <redacted:token>\n" + "<redacted:email>\n" * 30
