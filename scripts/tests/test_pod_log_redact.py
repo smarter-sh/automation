@@ -221,7 +221,34 @@ class TestPodLogRedact(unittest.TestCase):
             self.assertEqual(report["total"], 0, "a run with only expected placeholders can be healthy")
             self.assertEqual(report["expected"]["total"], 1)
 
+    def test_main_expects_account_ids_in_kubelet_events(self):
+        # a kubelet Pulled event of an HPA scale-up prints the ECR image name (smarter-sh/smarter#1025).
+        account_id = "123456789012"
+        registry = account_id + ".dkr.ecr.us-east-2.amazonaws.com/smarter:v0.46.9"
+        event = (
+            'Normal  Pulled  pod/smarter-worker-abc  Container image "' + registry + '" already present on machine\n'
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            inventory = Path(folder) / "inventory"
+            inventory.mkdir()
+            events = inventory / "events.txt"
+            events.write_text(event, encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch.object(sys, "argv", ["pod_log/redact.py", folder]), redirect_stdout(output):
+                self.assertEqual(main(), 0)
+            redacted_event = events.read_text(encoding="utf-8")
+            self.assertNotIn(account_id, redacted_event, "the id is still redacted")
+            self.assertIn("<redacted:aws-account-id>.dkr.ecr.", redacted_event)
+            report = read_report(folder)
+            self.assertEqual(report["total"], 0)
+            self.assertEqual(
+                report["expected"]["files"], {"inventory/events.txt": {"aws-account-id": {"count": 1, "lines": [1]}}}
+            )
+            self.assertNotIn("::warning::", output.getvalue())
+
     def test_is_expected(self):
+        self.assertTrue(is_expected("inventory/events.txt", "aws-account-id"))
+        self.assertTrue(is_expected("inventory/describe.txt", "aws-account-id"))
         self.assertTrue(is_expected("inventory/images.txt", "aws-account-id"))
         self.assertFalse(is_expected("inventory/images.txt", "email"))
         self.assertFalse(is_expected("smarter/pod.log", "aws-account-id"))
