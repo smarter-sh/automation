@@ -115,6 +115,12 @@ message that started you says how many there are (`- Redactions:`). `redactions.
 folder, lists each file, kind and line number; it never holds the redacted value, and neither do
 the logs any more.
 
+The one exception is `<redacted:aws-account-id>` in `inventory/`. kubectl prints the AWS account id
+in every ECR image name (`describe.txt`, `images.txt`) and in the IRSA role's `AWS_ROLE_ARN`, so it
+is redacted there in every run. Those placeholders are expected: the redactor lists them under
+`expected` in `redactions.json`, leaves them out of the count in `- Redactions:`, and they are
+**not** findings. Don't open or update an issue for them. The same kind in a pod's log is a finding.
+
 For each kind of placeholder, grouped by the log statement that wrote it:
 
 - Read the lines around it, and find the code that logged the line: its prefix (the module or

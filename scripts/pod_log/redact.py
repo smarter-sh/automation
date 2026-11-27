@@ -23,6 +23,12 @@ folder, which says where each placeholder is (file, kind, line numbers, never th
 review's prompt names the count, a run with redactions is never reported as healthy, and the
 workflow's log gets a warning.
 
+The one exception is kubectl's own output, in ``inventory/``: it prints the AWS account id in every
+ECR image name and in the IRSA role's ARN, so every run redacts it there. Those placeholders are
+still written, so the id never reaches an issue, but :data:`EXPECTED` keeps them out of the report's
+``total``, which counts findings only. Otherwise no review could ever be healthy
+(smarter-sh/smarter#1002).
+
 It uses only Python's standard library, which comes with every Python install:
 
 - ``argparse`` reads the command line: here, the one argument, the folder.
@@ -185,8 +191,19 @@ REPORT_NAME = "redactions.json"
 """The report that :func:`main` writes in the folder: where each placeholder is.
 
 E.g. ``{"total": 3, "kinds": {"email": 3}, "files": {"smarter/<pod>.log": {"email": {"count": 3,
-"lines": [12, 40, 41]}}}}``. It names files, kinds and line numbers, never a redacted value. Its
-``.json`` suffix keeps it out of the files that :func:`main` redacts.
+"lines": [12, 40, 41]}}}, "expected": {"total": 62, "kinds": {...}, "files": {...}}}``. ``total``,
+``kinds`` and ``files`` are the findings; ``expected`` has the same shape and holds the placeholders
+of :data:`EXPECTED`, which are not. It names files, kinds and line numbers, never a redacted value.
+Its ``.json`` suffix keeps it out of the files that :func:`main` redacts.
+"""
+
+EXPECTED: dict[str, set[str]] = {"inventory": {"aws-account-id"}}
+"""The kinds of placeholder that are expected in a top-level folder, and are not findings.
+
+``inventory/`` is kubectl's output, not a Smarter log. kubectl prints the AWS account id in every
+ECR image name (``describe.txt``'s ``Image:`` lines, ``images.txt``) and in the IRSA role's ARN
+(``AWS_ROLE_ARN``), so each run redacts it there, and the count grows with the ReplicaSet history.
+The same kind in a pod's log is still a finding.
 """
 
 MAX_LINES = 20
@@ -339,17 +356,42 @@ def _redact_file(path: pathlib.Path) -> str:
     return text
 
 
-def _write_report(folder: pathlib.Path, total: collections.Counter, where: dict[str, dict]) -> dict:
+def is_expected(relative_path: str, kind: str) -> bool:
+    """
+    Say whether a placeholder is expected where it is, and so not a finding (see :data:`EXPECTED`).
+
+    :param relative_path: The file, relative to the log folder, e.g. ``inventory/images.txt``.
+    :param kind: The placeholder's kind, e.g. ``aws-account-id``.
+    :returns: True if the file's top-level folder expects that kind.
+    """
+    top_folder = relative_path.split("/", 1)[0]
+    expected_kinds = EXPECTED.get(top_folder, set())
+    return kind in expected_kinds
+
+
+def _section(total: collections.Counter, where: dict[str, dict]) -> dict:
+    """
+    Return one section of the report: its count, its kinds and its files.
+
+    :param total: The placeholders, by kind.
+    :param where: Where they are, by file.
+    :returns: E.g. ``{"total": 3, "kinds": {"email": 3}, "files": {...}}``.
+    """
+    kinds = dict(sorted(total.items()))
+    return {"total": sum(total.values()), "kinds": kinds, "files": where}
+
+
+def _write_report(folder: pathlib.Path, findings: dict, expected: dict) -> dict:
     """
     Write :data:`REPORT_NAME` in the folder.
 
     :param folder: The folder of logs.
-    :param total: The placeholders of every file, by kind.
-    :param where: Where they are, by file.
+    :param findings: The section of the findings, from :func:`_section`.
+    :param expected: The section of the expected placeholders, from :func:`_section`.
     :returns: The report that was written.
     """
-    kinds = dict(sorted(total.items()))
-    report = {"total": sum(total.values()), "kinds": kinds, "files": where}
+    report = dict(findings)
+    report["expected"] = expected
     report_json = json.dumps(report, indent=2)
     report_path = folder / REPORT_NAME
     report_path.write_text(report_json + "\n", encoding="utf-8")
@@ -376,8 +418,9 @@ def main() -> int:
     Redact every ``*.log`` and ``*.txt`` file under the folder named on the command line, in place.
 
     Writes :data:`REPORT_NAME` in the folder, and prints only the number of files and of
-    placeholders of each kind, never a match. When there are placeholders it also prints a GitHub
-    Actions ``::warning::``, because each one is a finding (see the module's docstring).
+    placeholders of each kind, never a match. When there are findings it also prints a GitHub
+    Actions ``::warning::``, because each one is a finding (see the module's docstring). The
+    placeholders of :data:`EXPECTED` are printed on their own line, and never warn.
 
     :returns: 0, or 1 if the folder doesn't exist.
     """
@@ -388,25 +431,37 @@ def main() -> int:
     if not folder.is_dir():
         print(f"pod_log/redact.py: {folder} is not a folder", file=sys.stderr)
         return 1
-    # the placeholders of every file, by kind, e.g. {"email": 3}.
+    # the findings of every file, by kind, e.g. {"email": 3}, and where they are, by file, e.g.
+    # {"smarter/<pod>.log": {"email": {"count": 3, "lines": [...]}}}.
     total: collections.Counter = collections.Counter()
-    # where they are, by file, e.g. {"smarter/<pod>.log": {"email": {"count": 3, "lines": [...]}}}.
     where: dict[str, dict] = {}
+    # the same for the placeholders that EXPECTED says are not findings.
+    expected_total: collections.Counter = collections.Counter()
+    expected_where: dict[str, dict] = {}
     files = _log_files(folder)
     for path in files:
         text = _redact_file(path)
         # counted from the placeholders in the redacted text, so that running the script twice
         # on the same folder reports the same thing.
         found = locate(text)
-        if not found:
-            continue
         relative_path = path.relative_to(folder).as_posix()
-        where[relative_path] = found
         for kind, entry in found.items():
-            total[kind] += entry["count"]
-    report = _write_report(folder, total, where)
+            if is_expected(relative_path, kind):
+                file_entries = expected_where.setdefault(relative_path, {})
+                file_entries[kind] = entry
+                expected_total[kind] += entry["count"]
+            else:
+                file_entries = where.setdefault(relative_path, {})
+                file_entries[kind] = entry
+                total[kind] += entry["count"]
+    findings = _section(total, where)
+    expected = _section(expected_total, expected_where)
+    report = _write_report(folder, findings, expected)
     summary = _summary(total)
     print(f"redacted {len(files)} file(s): {summary}")
+    if expected_total:
+        expected_summary = _summary(expected_total)
+        print(f"expected, not findings: {expected_summary}")
     if total:
         print(
             f"::warning::{report['total']} redaction(s) in {len(where)} log(s): Smarter's logs must not hold "

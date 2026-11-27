@@ -83,6 +83,14 @@ class TestPodLogReviewSlack(unittest.TestCase):
         self.assertIn("nothing is posted", output)
         post.assert_not_called()
 
+    def test_a_healthy_verdict_with_only_expected_redactions_gets_a_clean_bill_of_health(self):
+        # the account id in kubectl's inventory is expected, not a finding (smarter-sh/smarter#1002).
+        report_file = Path(self.log_dir) / "redactions.json"
+        report_file.write_text('{"total": 0, "expected": {"total": 62}}', encoding="utf-8")
+        status, output, _ = self.main([result_event()], "--dry-run")
+        self.assertEqual(status, 0)
+        self.assertIn("*Clean bill of health!*", output)
+
     def test_other_runs_post_nothing(self):
         cases = {
             "needs attention": [result_event("Verdict: needs attention")],
